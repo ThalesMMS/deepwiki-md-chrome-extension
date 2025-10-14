@@ -55,7 +55,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
 // Listen for tab update complete event, for batch processing
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (changeInfo.status === 'complete' && tab.url && tab.url.includes('deepwiki.com')) {
+  if (changeInfo.status === 'complete' && tab.url && (tab.url.includes('deepwiki.com') || tab.url.includes('app.devin.ai'))) {
     // Initialize the message queue for this tab as not ready
     if (!messageQueue[tabId] || !messageQueue[tabId].isReady) {
         messageQueue[tabId] = { isReady: false, queue: [] };
@@ -73,7 +73,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 chrome.tabs.onActivated.addListener(activeInfo => {
   // When a tab becomes active, check if it's a DeepWiki tab
   chrome.tabs.get(activeInfo.tabId, tab => {
-    if (tab && tab.url && tab.url.includes('deepwiki.com')) {
+    if (tab && tab.url && (tab.url.includes('deepwiki.com') || tab.url.includes('app.devin.ai'))) {
       // Ensure queue is initialized
       if (!messageQueue[tab.id]) {
         messageQueue[tab.id] = { isReady: false, queue: [] };
