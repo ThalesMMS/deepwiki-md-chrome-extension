@@ -12,12 +12,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
   initializeBatchStatus();
 
+  // Função auxiliar para verificar se o site é válido
+  function isValidSite(url) {
+    return url.includes('deepwiki.com') || url.includes('devin.ai');
+  }
+
   convertBtn.addEventListener('click', async () => {
     try {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
-      if (!tab.url.includes('deepwiki.com')) {
-        showStatus('Please use this extension on a DeepWiki page', 'error');
+      // VERIFICAÇÃO ATUALIZADA
+      if (!isValidSite(tab.url)) {
+        showStatus('Please use this extension on a DeepWiki or Devin page', 'error');
         return;
       }
 
@@ -53,8 +59,9 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
-      if (!tab.url.includes('deepwiki.com')) {
-        showStatus('Please use this extension on a DeepWiki page', 'error');
+      // VERIFICAÇÃO ATUALIZADA
+      if (!isValidSite(tab.url)) {
+        showStatus('Please use this extension on a DeepWiki or Devin page', 'error');
         return;
       }
 

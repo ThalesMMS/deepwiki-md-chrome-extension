@@ -2,6 +2,76 @@ importScripts('lib/jszip.min.js');
 
 const MESSAGE_TIMEOUT = 30000;
 const messageQueue = {};
+const CONTENT_READY_TIMEOUT = 20000;
+const CONTENT_READY_MIN_TEXT = 160;
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// Função auxiliar para validar URL no background também
+function isValidUrl(url) {
+  return url && (url.includes('deepwiki.com') || url.includes('devin.ai'));
+}
+
+function getProjectPrefix(urlString) {
+  try {
+    const url = new URL(urlString);
+    const segments = url.pathname.split('/').filter(Boolean);
+
+    const markers = new Set(['deepwiki', 'wiki', 'docs']);
+    const markerIdx = segments.findIndex(seg => markers.has(seg.toLowerCase()));
+    if (markerIdx >= 0) {
+      const markerPrefixLength = Math.min(segments.length, markerIdx + 3);
+      return `/${segments.slice(0, markerPrefixLength).join('/')}`;
+    }
+
+    if (segments.length >= 2) {
+      return `/${segments.slice(0, 2).join('/')}`;
+    }
+    if (segments.length === 1) {
+      return `/${segments[0]}`;
+    }
+    return '/';
+  } catch (error) {
+    console.warn('Failed to derive project prefix:', error.message);
+    return null;
+  }
+}
+
+function filterPagesToProject(pages, currentUrl) {
+  let base;
+  try {
+    base = new URL(currentUrl);
+  } catch (error) {
+    console.warn('Invalid current URL for filtering:', error.message);
+    return pages || [];
+  }
+
+  const prefix = getProjectPrefix(currentUrl);
+  if (!Array.isArray(pages) || pages.length === 0) {
+    return [];
+  }
+
+  const filtered = pages.filter(page => {
+    try {
+      const pageUrl = new URL(page.url, base.origin);
+      if (pageUrl.origin !== base.origin) return false;
+      if (!prefix) return true;
+      return pageUrl.pathname.startsWith(prefix);
+    } catch (error) {
+      return false;
+    }
+  });
+
+  console.log('Batch page filtering:', {
+    extracted: pages.length,
+    filtered: filtered.length,
+    prefix
+  });
+
+  return filtered;
+}
 
 const createInitialBatchState = () => ({
   isRunning: false,
@@ -104,6 +174,14 @@ function sendMessageToTab(tabId, message) {
   const entry = messageQueue[tabId];
   const tryDirect = () => attemptDirectMessage(tabId, message);
 
+  // Se a aba foi marcada como "pending", não tente envio direto:
+  // isso evita falar com a página antiga durante a navegação.
+  if (entry && entry.isReady === false) {
+    return new Promise((resolve, reject) => {
+      queueMessageForTab(tabId, message, resolve, reject);
+    });
+  }
+
   if (entry && entry.isReady) {
     return tryDirect();
   }
@@ -116,6 +194,52 @@ function sendMessageToTab(tabId, message) {
     return new Promise((resolve, reject) => {
       queueMessageForTab(tabId, message, resolve, reject);
     });
+  });
+}
+
+function urlsRoughlyMatch(expectedUrl, actualUrl) {
+  if (!expectedUrl || !actualUrl) return true;
+  try {
+    const expected = new URL(expectedUrl);
+    const actual = new URL(actualUrl);
+    if (expected.origin !== actual.origin) return false;
+    return actual.pathname.startsWith(expected.pathname) ||
+      expected.pathname.startsWith(actual.pathname);
+  } catch (error) {
+    return true;
+  }
+}
+
+function waitForTabUrl(tabId, expectedUrl, timeoutMs = MESSAGE_TIMEOUT, intervalMs = 200) {
+  if (!expectedUrl) {
+    return Promise.resolve();
+  }
+
+  const start = Date.now();
+  return new Promise((resolve, reject) => {
+    const poll = () => {
+      chrome.tabs.get(tabId, tab => {
+        const err = chrome.runtime.lastError;
+        if (err) {
+          reject(new Error(err.message));
+          return;
+        }
+
+        if (urlsRoughlyMatch(expectedUrl, tab.url)) {
+          resolve();
+          return;
+        }
+
+        if (Date.now() - start >= timeoutMs) {
+          reject(new Error('Tab URL did not reach expected value in time.'));
+          return;
+        }
+
+        setTimeout(poll, intervalMs);
+      });
+    };
+
+    poll();
   });
 }
 
@@ -210,12 +334,23 @@ async function restoreOriginalPage() {
   }
 }
 
-function waitForNavigation(tabId) {
+function waitForNavigation(tabId, expectedUrl) {
   return new Promise((resolve, reject) => {
     const timeoutId = setTimeout(() => {
       cleanup();
       reject(new Error('Navigation timeout.'));
     }, MESSAGE_TIMEOUT);
+    let settled = false;
+
+    const tabUrlWait = waitForTabUrl(tabId, expectedUrl).then(() => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve();
+    }).catch(error => {
+      // Não falha aqui; deixamos o evento de navegação decidir.
+      console.warn('waitForTabUrl warning:', error.message);
+    });
 
     function cleanup() {
       clearTimeout(timeoutId);
@@ -224,7 +359,9 @@ function waitForNavigation(tabId) {
     }
 
     function onCompleted(details) {
-      if (details.tabId === tabId && details.frameId === 0) {
+      if (details.tabId === tabId && details.frameId === 0 && urlsRoughlyMatch(expectedUrl, details.url)) {
+        if (settled) return;
+        settled = true;
         cleanup();
         resolve();
       }
@@ -232,6 +369,8 @@ function waitForNavigation(tabId) {
 
     function onError(details) {
       if (details.tabId === tabId && details.frameId === 0) {
+        if (settled) return;
+        settled = true;
         cleanup();
         reject(new Error(details.error || 'Navigation error'));
       }
@@ -250,9 +389,35 @@ function navigateToPage(tabId, url) {
         reject(new Error(chrome.runtime.lastError.message));
         return;
       }
-      waitForNavigation(tabId).then(resolve).catch(reject);
+      waitForNavigation(tabId, url).then(resolve).catch(reject);
     });
   });
+}
+
+async function waitForPageContent(tabId, expectedUrl) {
+  try {
+    const response = await sendMessageToTab(tabId, {
+      action: 'waitForContentReady',
+      expectedUrl,
+      timeoutMs: CONTENT_READY_TIMEOUT,
+      minTextLength: CONTENT_READY_MIN_TEXT
+    });
+    return response || null;
+  } catch (error) {
+    console.warn('waitForContentReady failed:', error.message);
+    return null;
+  }
+}
+
+function isMarkdownSuspiciouslyEmpty(markdown, readiness) {
+  const length = (markdown || '').trim().length;
+  if (length >= 80) return false;
+  const metrics = readiness?.metrics;
+  if (!metrics) {
+    return length < 20;
+  }
+  const contentLooksSubstantial = metrics.textLength >= CONTENT_READY_MIN_TEXT || metrics.meaningfulCount >= 6 || metrics.hasMermaid;
+  return contentLooksSubstantial && length < 80;
 }
 
 async function processSinglePage(page) {
@@ -267,9 +432,32 @@ async function processSinglePage(page) {
   await navigateToPage(batchState.tabId, page.url);
   if (batchState.cancelRequested) return;
 
-  const convertResponse = await sendMessageToTab(batchState.tabId, { action: 'convertToMarkdown' });
+  // Aguarda conteúdo real renderizar (importante para SPA como app.devin.ai)
+  const readiness = await waitForPageContent(batchState.tabId, page.url);
+
+  let convertResponse = await sendMessageToTab(batchState.tabId, { action: 'convertToMarkdown' });
   if (!convertResponse || !convertResponse.success) {
     throw new Error(convertResponse?.error || 'Conversion failed');
+  }
+
+  // Se parece vazio mas a página aparenta ter conteúdo, tenta novamente após um pequeno delay
+  if (isMarkdownSuspiciouslyEmpty(convertResponse.markdown, readiness)) {
+    console.warn('Suspiciously empty markdown, retrying once:', {
+      title: page.title,
+      url: page.url,
+      readiness
+    });
+    await sleep(900);
+    const retryReadiness = await waitForPageContent(batchState.tabId, page.url);
+    const retryResponse = await sendMessageToTab(batchState.tabId, { action: 'convertToMarkdown' });
+    if (retryResponse && retryResponse.success) {
+      convertResponse = retryResponse;
+      if (isMarkdownSuspiciouslyEmpty(convertResponse.markdown, retryReadiness || readiness)) {
+        throw new Error('Converted markdown appears empty after retry.');
+      }
+    } else {
+      throw new Error(retryResponse?.error || 'Conversion retry failed');
+    }
   }
 
   const fileName = getUniqueFileName(convertResponse.markdownTitle || page.title);
@@ -278,6 +466,9 @@ async function processSinglePage(page) {
   broadcastBatchUpdate('pageProcessed', {
     message: `Converted ${batchState.processed}/${batchState.total}: ${page.title}`
   });
+
+  // Pequeno respiro para evitar navegação agressiva demais
+  await sleep(250);
 }
 
 async function createZipArchive() {
@@ -389,8 +580,10 @@ async function startBatchProcessing(tabId) {
   }
 
   const tab = await getTabById(tabId);
-  if (!tab.url || !tab.url.includes('deepwiki.com')) {
-    throw new Error('Please open a DeepWiki page before starting batch conversion.');
+  
+  // ALTERADO AQUI
+  if (!isValidUrl(tab.url)) {
+    throw new Error('Please open a DeepWiki or Devin page before starting batch conversion.');
   }
 
   const extraction = await sendMessageToTab(tabId, { action: 'extractAllPages' });
@@ -398,9 +591,10 @@ async function startBatchProcessing(tabId) {
     throw new Error(extraction?.error || 'Failed to extract sidebar links.');
   }
 
-  const pages = extraction.pages || [];
+  const extractedPages = extraction.pages || [];
+  const pages = filterPagesToProject(extractedPages, tab.url);
   if (!pages.length) {
-    throw new Error('No child pages were detected on this document.');
+    throw new Error('No child pages were detected for the current project.');
   }
 
   batchState = {
@@ -493,11 +687,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
 // Listen for tab updates to reset readiness and notify content scripts
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (!tab.url || !tab.url.includes('deepwiki.com')) {
+  // ALTERADO AQUI
+  if (!isValidUrl(tab.url)) {
     return;
   }
 
-  if (changeInfo.status === 'loading' || changeInfo.status === 'complete') {
+  // Marque como pending apenas no início da navegação (ou quando a URL muda).
+  // Marcar em "complete" pode sobrescrever um contentScriptReady já recebido.
+  if (changeInfo.status === 'loading' || changeInfo.url) {
     markTabPending(tabId);
   }
 
@@ -514,7 +711,8 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 // Keep content script informed when a DeepWiki tab becomes active
 chrome.tabs.onActivated.addListener(activeInfo => {
   chrome.tabs.get(activeInfo.tabId, tab => {
-    if (tab && tab.url && tab.url.includes('deepwiki.com')) {
+    // ALTERADO AQUI
+    if (tab && isValidUrl(tab.url)) {
       chrome.tabs.sendMessage(activeInfo.tabId, { action: 'tabActivated' }, () => {
         const error = chrome.runtime.lastError;
         if (error && !error.message.includes('Receiving end does not exist')) {

@@ -4,28 +4,19 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     try {
       // Get page title from head
       const headTitle = document.title || "";
-      // Format head title: replace slashes and pipes with dashes
       const formattedHeadTitle = headTitle.replace(/[\/|]/g, '-').replace(/\s+/g, '-').replace('---','-');
 
-      // Get article title (keep unchanged)
+      // --- ESTRATÉGIA DE SELEÇÃO DE TÍTULO ---
       const title =
-        document
-          .querySelector(
-            '.container > div:nth-child(1) a[data-selected="true"]'
-          )
-          ?.textContent?.trim() ||
-        document
-          .querySelector(".container > div:nth-child(1) h1")
-          ?.textContent?.trim() ||
+        document.querySelector('.container > div:nth-child(1) a[data-selected="true"]')?.textContent?.trim() ||
+        document.querySelector("main h1")?.textContent?.trim() ||
+        document.querySelector("article h1")?.textContent?.trim() ||
         document.querySelector("h1")?.textContent?.trim() ||
         "Untitled";
 
-      // Get article content container (keep unchanged)
-      const contentContainer =
-        document.querySelector(".container > div:nth-child(2) .prose") ||
-        document.querySelector(".container > div:nth-child(2) .prose-custom") ||
-        document.querySelector(".container > div:nth-child(2)") ||
-        document.body;
+      // --- ESTRATÉGIA DE SELEÇÃO DE CONTEÚDO (Ultra Robusta) ---
+      // Prioriza containers semânticos ou específicos de documentação
+      const contentContainer = selectContentContainer();
 
       let markdown = ``;
       let markdownTitle = title.replace(/\s+/g, '-');
@@ -36,6 +27,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
       // Normalize blank lines
       markdown = markdown.trim().replace(/\n{3,}/g, "\n\n");
+
+      // --- INTEGRAÇÃO: DEEPWIKI LINK FIX ---
+      console.log("Applying DeepWiki Fixes...");
+      markdown = DeepWikiFixer.process(markdown);
+      // -------------------------------------
+
       sendResponse({ 
         success: true, 
         markdown, 
@@ -48,37 +45,167 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
   } else if (request.action === "extractAllPages") {
     try {
-      // Get the head title
       const headTitle = document.title || "";
-      // Format head title: replace slashes and pipes with dashes
       const formattedHeadTitle = headTitle.replace(/[\/|]/g, '-').replace(/\s+/g, '-').replace('---','-');
+      const baseUrl = window.location.href;
+      const baseOrigin = window.location.origin;
+      const currentPath = window.location.pathname || "/";
+
+      // Deriva prefixos do "projeto atual" a partir da URL corrente
+      const pathSegments = currentPath.split("/").filter(Boolean);
+      const prefixCandidates = new Set();
+      for (let len = 2; len <= Math.min(4, pathSegments.length); len++) {
+        prefixCandidates.add(`/${pathSegments.slice(0, len).join("/")}`);
+      }
+      if (pathSegments.length > 1) {
+        prefixCandidates.add(`/${pathSegments.slice(0, -1).join("/")}`);
+      } else if (pathSegments.length === 1) {
+        prefixCandidates.add(`/${pathSegments[0]}`);
+      }
+
+      const prefixList = Array.from(prefixCandidates).sort((a, b) => b.length - a.length);
+      let defaultPrefix = "/";
+      if (pathSegments.length >= 2) {
+        defaultPrefix = `/${pathSegments.slice(0, 2).join("/")}`;
+      } else if (pathSegments.length === 1) {
+        defaultPrefix = `/${pathSegments[0]}`;
+      }
+
+      function resolveUrl(href) {
+        try {
+          return new URL(href, baseUrl);
+        } catch (e) {
+          return null;
+        }
+      }
+
+      let bestPrefix = defaultPrefix;
+
+      function matchesProjectPrefix(urlObj) {
+        if (!urlObj) return false;
+        if (!bestPrefix) return true;
+        return urlObj.pathname.startsWith(bestPrefix);
+      }
       
-      // Get the base part of the current document path
-      const baseUrl = window.location.origin;
+      // --- ESTRATÉGIA DE SELEÇÃO DE BARRA LATERAL (Correção para Devin.ai) ---
+      let sidebarLinks = [];
       
-      // Get all links in the sidebar
-      const sidebarLinks = Array.from(document.querySelectorAll('.border-r-border ul li a'));
+      // 1. Tenta containers semânticos ou de navegação comuns
+      // No Devin/DeepWiki, a sidebar geralmente está à esquerda.
+      // Procuramos containers que pareçam ser de navegação.
+      const navContainers = Array.from(
+        document.querySelectorAll('nav, aside, .sidebar, [class*="sidebar"], [class*="Sidebar"], [class*="menu"], [class*="drawer"]')
+      );
+
+      // Calcula um prefixo mais específico com base nos próprios links disponíveis
+      if (navContainers.length > 0 && prefixList.length > 0) {
+        const allLinkPaths = navContainers
+          .flatMap(nav => Array.from(nav.querySelectorAll("a")))
+          .map(link => resolveUrl(link.getAttribute("href")))
+          .filter(urlObj => urlObj && urlObj.origin === baseOrigin)
+          .map(urlObj => urlObj.pathname);
+
+        let bestCount = 0;
+        prefixList.forEach(prefix => {
+          const count = allLinkPaths.filter(path => path.startsWith(prefix)).length;
+          if (count > bestCount || (count === bestCount && prefix.length > bestPrefix.length)) {
+            bestPrefix = prefix;
+            bestCount = count;
+          }
+        });
+
+        // Evita ficar específico demais quando há poucos matches
+        if (bestCount < 3) {
+          bestPrefix = defaultPrefix;
+        }
+
+        console.log("DeepWiki prefix selection:", { defaultPrefix, bestPrefix, matches: bestCount });
+      }
       
-      // Extract link URLs and titles
-      const pages = sidebarLinks.map(link => {
-        return {
-          url: new URL(link.getAttribute('href'), baseUrl).href,
-          title: link.textContent.trim(),
-          selected: link.getAttribute('data-selected') === 'true'
-        };
+      if (navContainers.length > 0) {
+        // Escolhe o container com mais links que parecem pertencer ao projeto atual
+        let bestNav = navContainers[0];
+        let bestScore = -1;
+
+        navContainers.forEach(nav => {
+          const links = Array.from(nav.querySelectorAll("a"));
+          if (links.length === 0) return;
+
+          let sameOriginCount = 0;
+          let projectMatchCount = 0;
+
+          links.forEach(link => {
+            const href = link.getAttribute("href");
+            if (!href) return;
+            const urlObj = resolveUrl(href);
+            if (!urlObj || urlObj.origin !== baseOrigin) return;
+            sameOriginCount += 1;
+            if (matchesProjectPrefix(urlObj)) {
+              projectMatchCount += 1;
+            }
+          });
+
+          // Score prioriza links do projeto atual e a proporção desses links
+          const ratio = sameOriginCount > 0 ? projectMatchCount / sameOriginCount : 0;
+          const score = projectMatchCount * 10 + ratio;
+
+          if (score > bestScore) {
+            bestScore = score;
+            bestNav = nav;
+          }
+        });
+
+        sidebarLinks = Array.from(bestNav.querySelectorAll('a'));
+      }
+
+      // 2. Fallback específico para DeepWiki original (listas aninhadas)
+      if (sidebarLinks.length === 0) {
+        const nodes = document.querySelectorAll('.border-r-border ul li a, [class*="border-r"] ul li a');
+        sidebarLinks = Array.from(nodes);
+      }
+
+      // 3. Filtragem e Limpeza dos Links
+      const validLinks = sidebarLinks.filter(link => {
+         const href = link.getAttribute('href');
+         // Ignora links vazios, âncoras locais, emails e javascript
+         if (!href || href.startsWith('#') || href.startsWith('mailto') || href.startsWith('javascript')) return false;
+
+         const urlObj = resolveUrl(href);
+         // Mantém apenas links no mesmo origin
+         if (!urlObj || urlObj.origin !== baseOrigin) return false;
+         // Mantém apenas links do projeto/prefixo atual (evita navegar por outros projetos)
+         if (!matchesProjectPrefix(urlObj)) return false;
+         
+         // Ignora links que parecem ser de perfil/logout/settings se o texto for muito curto ou comum
+         const text = link.textContent.trim().toLowerCase();
+         if (['logout', 'sign out', 'settings', 'profile', 'home'].includes(text)) return false;
+         
+         // No Devin/DeepWiki, links de conteúdo geralmente não são apenas ícones (têm texto)
+         if (text.length === 0) return false;
+
+         return true;
       });
+
+      // Remove duplicatas baseadas na URL
+      const uniquePagesMap = new Map();
+      validLinks.forEach(link => {
+        const urlObj = resolveUrl(link.getAttribute('href'));
+        if (!urlObj) return;
+        const fullUrl = urlObj.href;
+        if (!uniquePagesMap.has(fullUrl)) {
+            uniquePagesMap.set(fullUrl, {
+                url: fullUrl,
+                title: link.textContent.trim() || "Untitled Page",
+                selected: link.getAttribute('data-selected') === 'true' || link.classList.contains('active') || link.classList.contains('selected')
+            });
+        }
+      });
+
+      const pages = Array.from(uniquePagesMap.values());
       
-      // Get current page information for return
       const currentPageTitle =
-        document
-          .querySelector(
-            '.container > div:nth-child(1) a[data-selected="true"]'
-          )
-          ?.textContent?.trim() ||
-        document
-          .querySelector(".container > div:nth-child(1) h1")
-          ?.textContent?.trim() ||
-        document.querySelector("h1")?.textContent?.trim() ||
+        document.querySelector("main h1")?.textContent?.trim() ||
+        document.querySelector("h1")?.textContent?.trim() || 
         "Untitled";
         
       sendResponse({ 
@@ -92,26 +219,432 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       console.error("Error extracting page links:", error);
       sendResponse({ success: false, error: error.message });
     }
+  } else if (request.action === "waitForContentReady") {
+    waitForContentReady(request)
+      .then(response => sendResponse(response))
+      .catch(error => {
+        console.error("waitForContentReady error:", error);
+        sendResponse({ ready: false, error: error.message });
+      });
+    return true;
   } else if (request.action === "pageLoaded") {
-    // Page loading complete, batch operation preparation can be handled here
-    // No sendResponse needed, as this is a notification from background.js
     console.log("Page loaded:", window.location.href);
-    // Always send a response, even if empty, to avoid connection errors
     sendResponse({ received: true });
   } else if (request.action === "tabActivated") {
-    // Tab has been activated, possibly after being in bfcache
     console.log("Tab activated:", window.location.href);
-    // Acknowledge receipt of message to avoid connection errors
     sendResponse({ received: true });
   }
-  // Always return true for asynchronous sendResponse handling
   return true;
 });
+
+function selectContentContainer() {
+  return (
+    document.querySelector(".container > div:nth-child(2) .prose") ||
+    document.querySelector(".container > div:nth-child(2) .prose-custom") ||
+    document.querySelector(".container > div:nth-child(2)") || // DeepWiki fallback
+    document.querySelector("main .prose") ||
+    document.querySelector("article .prose") ||
+    document.querySelector(".prose") || // Tailwind typography standard
+    document.querySelector("article") || // Semantic HTML
+    document.querySelector("main") ||    // Semantic HTML
+    document.querySelector(".markdown-body") || // GitHub style
+    document.querySelector(".wiki-content") ||  // Common wiki class
+    document.body // Ultimate fallback
+  );
+}
+
+function urlsRoughlyMatch(expectedUrl) {
+  if (!expectedUrl) return true;
+  try {
+    const expected = new URL(expectedUrl);
+    const current = new URL(window.location.href);
+    if (expected.origin !== current.origin) return false;
+    // Ignora search/hash e permite subpaths quando a navegação for SPA
+    return current.pathname.startsWith(expected.pathname);
+  } catch (e) {
+    return true;
+  }
+}
+
+function getContentReadinessMetrics() {
+  const container = selectContentContainer();
+  if (!container) {
+    return {
+      hasContainer: false,
+      textLength: 0,
+      meaningfulCount: 0,
+      hasMermaid: false
+    };
+  }
+
+  const textLength = (container.textContent || "").trim().length;
+  const meaningfulCount = container.querySelectorAll(
+    "p, pre, code, table, ul, ol, h1, h2, h3, h4, h5, h6, svg[id^='mermaid-']"
+  ).length;
+  const hasMermaid = Boolean(container.querySelector("svg[id^='mermaid-'], pre code.language-mermaid"));
+
+  return {
+    hasContainer: true,
+    textLength,
+    meaningfulCount,
+    hasMermaid
+  };
+}
+
+async function waitForContentReady(options = {}) {
+  const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 20000;
+  const intervalMs = Number(options.intervalMs) > 0 ? Number(options.intervalMs) : 250;
+  const minTextLength = Number(options.minTextLength) > 0 ? Number(options.minTextLength) : 160;
+  const expectedUrl = options.expectedUrl || "";
+
+  const start = Date.now();
+  const deadline = start + timeoutMs;
+
+  return new Promise(resolve => {
+    const tick = () => {
+      const urlOk = urlsRoughlyMatch(expectedUrl);
+      const metrics = getContentReadinessMetrics();
+      const ready =
+        urlOk &&
+        metrics.hasContainer &&
+        (metrics.textLength >= minTextLength ||
+          metrics.meaningfulCount >= 6 ||
+          metrics.hasMermaid);
+
+      if (ready || Date.now() >= deadline) {
+        const timedOut = !ready;
+        console.log("Content readiness check:", {
+          ready,
+          timedOut,
+          urlOk,
+          expectedUrl,
+          currentUrl: window.location.href,
+          metrics
+        });
+        resolve({
+          ready,
+          timedOut,
+          urlOk,
+          metrics,
+          currentUrl: window.location.href,
+          expectedUrl
+        });
+        return;
+      }
+
+      setTimeout(tick, intervalMs);
+    };
+
+    tick();
+  });
+}
+
+// ==========================================
+//  CLASSE DE INTEGRAÇÃO DO FIX_DOCS (PORT)
+// ==========================================
+
+const DeepWikiFixer = {
+  process(text) {
+    if (!text) return "";
+    text = this.stripPreamble(text);
+    text = this.removeLinkCopied(text);
+    text = this.removeAskDevinLines(text);
+    text = this.fixInternalLinks(text);
+    text = this.fixSectionLinks(text);
+    text = this.stripGithubBlobSha(text);
+    text = this.sanitizeMermaid(text);
+    return text;
+  },
+
+  SECTION_ANCHORS: {
+    "Networking Section": "networking-configuration",
+    "Virtual Environment Section": "virtual-environment-setup",
+    "Module Import Section": "module-import-issues",
+    "WSL.exe Section": "wslexe-issues",
+    "Path Translation Section": "path-translation-issues",
+    "Performance Section": "performance-optimization",
+    "Line Ending Section": "line-ending-issues",
+    "Distribution Section": "distribution-selection",
+  },
+
+  BRANCH_LABELS: new Set(["yes", "no", "true", "false"]),
+  
+  POSITIVE_HINTS: [
+    "add", "use", "enable", "create", "remove", "success", "ready", 
+    "connected", "established", "proceed", "continue"
+  ],
+  
+  NEGATIVE_HINTS: [
+    "fail", "error", "invalid", "reject", "timeout", "blocked", 
+    "missing", "not", "false", "empty", "return", "skip", "default"
+  ],
+
+  stripPreamble(text) {
+    const lines = text.split('\n');
+    let firstHeaderIdx = -1;
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].trimStart().startsWith('#')) {
+        firstHeaderIdx = i;
+        break;
+      }
+    }
+    if (firstHeaderIdx === -1 || firstHeaderIdx === 0) return text;
+    let remaining = lines.slice(firstHeaderIdx).join('\n');
+    if (text.endsWith('\n')) remaining += '\n';
+    return remaining;
+  },
+
+  removeLinkCopied(text) {
+    return text.replace(/\s*Link copied!/g, "");
+  },
+
+  removeAskDevinLines(text) {
+    const lines = text.split('\n');
+    const filtered = lines.filter(line => !line.trim().startsWith("Ask Devin about"));
+    let result = filtered.join('\n');
+    if (text.endsWith('\n')) result += '\n';
+    return result;
+  },
+
+  fixInternalLinks(text) {
+    text = text.replace(/\]\((?!\s*http)(\/[^)\s]+)\)/g, (match, p1) => {
+        return `](https://github.com${p1})`;
+    });
+    text = text.replace(/(^\s*\[[^\]]+\]:\s*)(\/[^)\s]+)/gm, (match, p1, p2) => {
+        return `${p1}https://github.com${p2}`;
+    });
+    return text;
+  },
+
+  fixSectionLinks(text) {
+    for (const [section, anchor] of Object.entries(this.SECTION_ANCHORS)) {
+        const escapedSection = section.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const pattern = new RegExp(`https://github\\.com/(?<owner>[^/]+)/(?<repo>[^/]+)/blob/(?<sha>[0-9a-f]{7,40})/${escapedSection}`, 'g');
+        
+        text = text.replace(pattern, (...args) => {
+            const groups = args.pop(); 
+            return `https://github.com/${groups.owner}/${groups.repo}/blob/${groups.sha}/README.md#${anchor}`;
+        });
+    }
+    return text;
+  },
+
+  stripGithubBlobSha(text) {
+    return text.replace(/https:\/\/github\.com\/([^/]+)\/([^/]+)\/blob\/([0-9a-f]{7,40})\//g, 
+        "https://github.com/$1/$2/");
+  },
+
+  sanitizeMermaid(text) {
+    const lines = text.split('\n');
+    const out = [];
+    let inBlock = false;
+    let blockLines = [];
+
+    for (const line of lines) {
+      if (line.trim().startsWith("```") && line.toLowerCase().includes("mermaid")) {
+        inBlock = true;
+        out.push(line);
+        blockLines = [];
+        continue;
+      }
+      if (inBlock) {
+        if (line.trim().startsWith("```")) {
+          out.push(...this.sanitizeMermaidBlock(blockLines));
+          out.push(line);
+          inBlock = false;
+        } else {
+          blockLines.push(line);
+        }
+        continue;
+      }
+      out.push(line);
+    }
+
+    if (inBlock) {
+      out.push(...this.sanitizeMermaidBlock(blockLines));
+    }
+
+    let result = out.join('\n');
+    if (text.endsWith('\n')) result += '\n';
+    return result;
+  },
+
+  sanitizeMermaidBlock(lines) {
+    lines = this.sanitizeNodeLabels(lines);
+    let blockType = null;
+    for (const line of lines) {
+      const stripped = line.trim();
+      if (!stripped) continue;
+      if (stripped.startsWith("flowchart") || stripped.startsWith("graph")) {
+        blockType = "flowchart";
+      }
+      break;
+    }
+    if (blockType === "flowchart") {
+      return this.moveBranchLabels(lines);
+    }
+    return lines;
+  },
+
+  sanitizeNodeLabels(lines) {
+    const nodeLabelRe = /\["(.*?)"\]/g;
+    return lines.map(line => {
+      return line.replace(nodeLabelRe, (match, label) => {
+        return `["${this.sanitizeLabel(label)}"]`;
+      });
+    });
+  },
+
+  sanitizeLabel(label) {
+    if (this.containsListMarker(label)) {
+      return "Unsupported markdown: list";
+    }
+    label = label.replace(/\[[^\]]+\]\([^)]+\)/g, "Unsupported markdown: link");
+    label = label.replace(/https?:\/\/\S+/g, "Unsupported markdown: link");
+    return label;
+  },
+
+  containsListMarker(label) {
+    const listItemRe = /^\s*(?:\d+\.\s+|[-*+]\s+)/;
+    const parts = label.split(/<br\s*\/?>/i);
+    return parts.some(part => listItemRe.test(part.trim()));
+  },
+
+  moveBranchLabels(lines) {
+    const edgeRe = /^(?<indent>\s*)(?<src>[A-Za-z0-9_]+)\s*(?<arrow>[-.=]+>)\s*(?:\|"(?<label>[^"]*)"\|\s*)?(?<dst>[A-Za-z0-9_]+)\s*$/;
+    const nodeLabelRe = /\["(.*?)"\]/;
+
+    const edges = [];
+    const nodeLabels = {};
+
+    lines.forEach((line, idx) => {
+      const labelMatch = line.match(nodeLabelRe);
+      if (labelMatch) {
+        const prefix = line.split('["')[0].trim();
+        if (prefix) {
+          nodeLabels[prefix] = labelMatch[1];
+        }
+      }
+
+      const match = line.match(edgeRe);
+      if (match && match.groups) {
+        edges.push({
+          lineIdx: idx,
+          indent: match.groups.indent,
+          src: match.groups.src,
+          arrow: match.groups.arrow,
+          label: match.groups.label || null,
+          dst: match.groups.dst
+        });
+      }
+    });
+
+    const outgoing = {};
+    edges.forEach((edge, idx) => {
+      if (!outgoing[edge.src]) outgoing[edge.src] = [];
+      outgoing[edge.src].push(idx);
+    });
+
+    const movedTargets = new Set();
+    const labelMoves = [];
+
+    edges.forEach((edge, edgeIdx) => {
+      if (movedTargets.has(edgeIdx)) return;
+      if (!this.isBranchLabel(edge.label)) return;
+      if ((outgoing[edge.src] || []).length !== 1) return;
+
+      const candidatesAll = outgoing[edge.dst] || [];
+      if (candidatesAll.length < 2) return;
+
+      const candidates = candidatesAll.filter(idx => edges[idx].label === null);
+      if (candidates.length === 0) return;
+
+      const polarity = this.labelPolarity(edge.label);
+      const targetIdx = this.chooseEdge(edges, nodeLabels, candidates, polarity);
+
+      if (targetIdx !== null) {
+        labelMoves.push({ from: edgeIdx, to: targetIdx });
+        movedTargets.add(targetIdx);
+      }
+    });
+
+    labelMoves.forEach(move => {
+      edges[move.to].label = edges[move.from].label;
+      edges[move.from].label = null;
+    });
+
+    edges.forEach(edge => {
+      if (edge.label) {
+        lines[edge.lineIdx] = `${edge.indent}${edge.src} ${edge.arrow}|"${edge.label}"| ${edge.dst}`;
+      } else {
+        lines[edge.lineIdx] = `${edge.indent}${edge.src} ${edge.arrow} ${edge.dst}`;
+      }
+    });
+
+    return lines;
+  },
+
+  isBranchLabel(label) {
+    if (!label) return false;
+    return this.BRANCH_LABELS.has(label.trim().toLowerCase());
+  },
+
+  labelPolarity(label) {
+    if (!label) return null;
+    const lowered = label.trim().toLowerCase();
+    if (lowered === "yes" || lowered === "true") return "positive";
+    if (lowered === "no" || lowered === "false") return "negative";
+    return null;
+  },
+
+  edgeScore(text, polarity) {
+    if (!polarity) return 0;
+    const textLower = text.toLowerCase();
+    
+    let posHits = 0;
+    this.POSITIVE_HINTS.forEach(hint => { if(textLower.includes(hint)) posHits++; });
+    
+    let negHits = 0;
+    this.NEGATIVE_HINTS.forEach(hint => { if(textLower.includes(hint)) negHits++; });
+
+    if (polarity === "positive") return posHits - negHits;
+    return negHits - posHits;
+  },
+
+  chooseEdge(edges, nodeLabels, candidates, polarity) {
+    if (!candidates || candidates.length === 0) return null;
+    if (candidates.length === 1) return candidates[0];
+
+    if (!polarity) {
+      const unlabeled = candidates.filter(idx => edges[idx].label === null);
+      return unlabeled.length === 1 ? unlabeled[0] : null;
+    }
+
+    const scored = candidates.map(idx => {
+      const dstNode = edges[idx].dst;
+      const targetLabel = nodeLabels[dstNode] || dstNode;
+      return {
+        score: this.edgeScore(targetLabel, polarity),
+        idx: idx
+      };
+    });
+
+    const maxScore = Math.max(...scored.map(s => s.score));
+    if (maxScore <= 0) {
+      const unlabeled = candidates.filter(idx => edges[idx].label === null);
+      return unlabeled.length === 1 ? unlabeled[0] : null;
+    }
+
+    const winners = scored.filter(s => s.score === maxScore);
+    return winners.length === 1 ? winners[0].idx : null;
+  }
+};
+
 // Function for Flowchart (ensure this exists from previous responses)
 function convertFlowchartSvgToMermaidText(svgElement) {
   if (!svgElement) return null;
 
-    console.log("Starting flowchart conversion with hierarchical logic...");
+  console.log("Starting flowchart conversion with hierarchical logic...");
   let mermaidCode = "flowchart TD\n\n";
   const nodes = {}; 
   const clusters = {}; 
@@ -167,7 +700,7 @@ function convertFlowchartSvgToMermaidText(svgElement) {
             title = labelEl.textContent.trim();
     }
     if (!title) {
-          title = svgId;
+            title = svgId;
         }
 
         const rect = clusterEl.querySelector('rect');
@@ -263,7 +796,7 @@ function convertFlowchartSvgToMermaidText(svgElement) {
                          sourceNode = foundSourceNode;
                          targetNode = foundTargetNode;
           break;
-                     }
+                      }
                 }
             }
         }
