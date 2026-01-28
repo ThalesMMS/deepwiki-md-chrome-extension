@@ -64,6 +64,62 @@ function findDevinTopicButtons() {
   return Array.from(document.querySelectorAll('ul li button')).filter(btn => getElementTitle(btn));
 }
 
+function getListItemDepth(element) {
+  const li = element.closest('li');
+  if (!li) return 0;
+
+  let paddingValue = '';
+  if (li.style && li.style.paddingLeft) {
+    paddingValue = li.style.paddingLeft;
+  } else {
+    try {
+      paddingValue = window.getComputedStyle(li).paddingLeft || '';
+    } catch (e) {
+      paddingValue = '';
+    }
+  }
+
+  const parsed = parseFloat(paddingValue);
+  if (Number.isFinite(parsed) && parsed > 0) {
+    return Math.max(0, Math.round(parsed / 12));
+  }
+
+  // Fallback: count nested lists
+  const listAncestors = Array.from(li.parentElement?.closest('ul, ol') ? li.parentElement.closest('ul, ol').querySelectorAll('ul, ol') : []);
+  if (listAncestors.length > 0) {
+    return listAncestors.length - 1;
+  }
+
+  return 0;
+}
+
+function applyNumberPrefixes(pages) {
+  const counts = [];
+
+  pages.forEach(page => {
+    const depth = Math.max(0, Number.isInteger(page.depth) ? page.depth : 0);
+
+    // Ensure counters length
+    while (counts.length <= depth) {
+      counts.push(0);
+    }
+
+    counts[depth] += 1;
+    counts.splice(depth + 1);
+
+    if (depth === 0) {
+      const top = String(counts[0]).padStart(2, '0');
+      page.numberPrefix = top;
+    } else {
+      const top = String(counts[0]).padStart(2, '0');
+      const subParts = counts.slice(1).map(n => String(n));
+      page.numberPrefix = [top, ...subParts].join('-');
+    }
+  });
+
+  return pages;
+}
+
 // Listen for messages from popup
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === "convertToMarkdown") {
@@ -204,9 +260,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
               url: baseUrl,
               title,
               selected,
-              devinIndex: index
+              devinIndex: index,
+              depth: getListItemDepth(btn)
             };
           });
+
+          applyNumberPrefixes(pages);
 
           const currentPageTitle =
             document.querySelector("main h1")?.textContent?.trim() ||
@@ -388,7 +447,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             uniquePagesMap.set(key, {
                 url: fullUrl,
                 title: linkTitle,
-                selected: link.getAttribute('data-selected') === 'true' || link.classList.contains('active') || link.classList.contains('selected')
+                selected: link.getAttribute('data-selected') === 'true' || link.classList.contains('active') || link.classList.contains('selected'),
+                depth: getListItemDepth(link)
             });
         }
       });
@@ -396,6 +456,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       console.log('[Batch Debug] Unique Hashes/Pages:', uniquePagesMap.size);
 
       let pages = Array.from(uniquePagesMap.values());
+
+      applyNumberPrefixes(pages);
       
       const currentPageTitle =
         document.querySelector("main h1")?.textContent?.trim() ||
@@ -1311,9 +1373,7 @@ function convertFlowchartSvgToMermaidText(svgElement) {
 
         const arrow = getArrowForPath(path);
         const safeLabel = label ? label.replace(/"/g, '#quot;') : '';
-        const labelPart = safeLabel ? `|"${safeLabel}"|` : "";
-        const edgeText = `${sourceNode.mermaidId} ${arrow}${labelPart} ${targetNode.mermaidId}`;
-    
+
         // Find Lowest Common Ancestor
         const sourceAncestors = [parentMap[sourceNode.svgId]];
         while (sourceAncestors[sourceAncestors.length - 1]) {
@@ -1324,7 +1384,13 @@ function convertFlowchartSvgToMermaidText(svgElement) {
             lca = parentMap[lca];
         }
         
-        edges.push({ text: edgeText, parentId: lca || 'root' });
+        edges.push({
+            source: sourceNode.mermaidId,
+            target: targetNode.mermaidId,
+            label: safeLabel,
+            baseArrow: arrow,
+            parentId: lca || 'root'
+        });
     });
     
     // 5. Generate Mermaid output
@@ -1348,10 +1414,31 @@ function convertFlowchartSvgToMermaidText(svgElement) {
         childrenMap[parentId].push(childId);
     }
     
+    const edgeKey = (source, target) => `${source}::${target}`;
+    const edgeSet = new Set(edges.map(edge => edgeKey(edge.source, edge.target)));
+
+    function normalizeArrowForStyle(baseArrow, useDashed) {
+        if (!useDashed) return baseArrow;
+        if (baseArrow.includes('-..->')) {
+            return baseArrow;
+        }
+        if (baseArrow === '<-->' || baseArrow === '<-.->' || baseArrow === '<-..->') {
+            return '<-.->';
+        }
+        return '-.->';
+    }
+
     edges.forEach(edge => {
         const parentId = edge.parentId || 'root';
         if (!edgeMap[parentId]) edgeMap[parentId] = [];
-        edgeMap[parentId].push(edge.text);
+
+        const reverseExists = edgeSet.has(edgeKey(edge.target, edge.source));
+        const useDashed = Boolean(edge.label) || reverseExists;
+        const arrow = normalizeArrowForStyle(edge.baseArrow, useDashed);
+        const labelPart = edge.label ? `|"${edge.label}"|` : "";
+        const edgeText = `${edge.source} ${arrow}${labelPart} ${edge.target}`;
+
+        edgeMap[parentId].push(edgeText);
     });
     
     // Add top-level edges

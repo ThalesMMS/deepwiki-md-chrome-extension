@@ -666,7 +666,11 @@ async function processSinglePage(page) {
     }
   }
 
-  const fileName = getUniqueFileName(convertResponse.markdownTitle || page.title);
+  let baseTitle = convertResponse.markdownTitle || page.title;
+  if (page.numberPrefix) {
+    baseTitle = `${page.numberPrefix}-${baseTitle}`;
+  }
+  const fileName = getUniqueFileName(baseTitle);
   batchState.convertedPages.push({ title: fileName, content: convertResponse.markdown });
   
   // Increment processed count
