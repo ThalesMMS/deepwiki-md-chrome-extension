@@ -105,21 +105,39 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           .filter(urlObj => urlObj && urlObj.origin === baseOrigin)
           .map(urlObj => urlObj.pathname);
 
-        let bestCount = 0;
-        prefixList.forEach(prefix => {
+        let bestCount = -1;
+        
+        // Prefer longer prefixes (deeper paths) to avoid capturing organization-wide links
+        // sort by length descending is key
+        prefixList.sort((a, b) => b.length - a.length);
+
+        for (const prefix of prefixList) {
           const count = allLinkPaths.filter(path => path.startsWith(prefix)).length;
-          if (count > bestCount || (count === bestCount && prefix.length > bestPrefix.length)) {
-            bestPrefix = prefix;
-            bestCount = count;
+          // Only switch if this prefix actually has a decent number of links (e.g. > 1)
+          if (count > 0) {
+             // Since we sorted by length descending, the first one that matches the current project structure is likely best.
+             // We prioritize the one that matches our current location best.
+             if (currentPath.startsWith(prefix)) {
+                 bestPrefix = prefix;
+                 bestCount = count;
+                 break; 
+             }
+             // Fallback logic
+             if (count > bestCount) {
+                 bestPrefix = prefix;
+                 bestCount = count;
+             }
           }
-        });
-
-        // Evita ficar específico demais quando há poucos matches
-        if (bestCount < 3) {
-          bestPrefix = defaultPrefix;
         }
-
-        console.log("DeepWiki prefix selection:", { defaultPrefix, bestPrefix, matches: bestCount });
+        console.log("DeepWiki Batch Debug:", {
+          totalLinksScanned: allLinkPaths.length,
+          candidates: prefixList,
+          chosenPrefix: bestPrefix,
+          matchCount: bestCount,
+          currentPath
+        });
+      } else {
+        console.log("DeepWiki Batch Debug: No nav containers or prefixes found.");
       }
       
       if (navContainers.length > 0) {
@@ -149,49 +167,60 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           const ratio = sameOriginCount > 0 ? projectMatchCount / sameOriginCount : 0;
           const score = projectMatchCount * 10 + ratio;
 
+          console.log('[Batch Debug] Nav Scan:', { 
+             elementClass: nav.className, 
+             totalLinks: links.length, 
+             projectMatches: projectMatchCount, 
+             score: score 
+          });
+
           if (score > bestScore) {
             bestScore = score;
             bestNav = nav;
           }
         });
 
+        console.log('[Batch Debug] Selected Nav Score:', bestScore);
         sidebarLinks = Array.from(bestNav.querySelectorAll('a'));
       }
 
       // 2. Fallback específico para DeepWiki original (listas aninhadas)
       if (sidebarLinks.length === 0) {
+        console.log('[Batch Debug] Fallback: Trying specific selectors...');
         const nodes = document.querySelectorAll('.border-r-border ul li a, [class*="border-r"] ul li a');
         sidebarLinks = Array.from(nodes);
       }
+
+      console.log('[Batch Debug] Raw Sidebar Links:', sidebarLinks.length);
 
       // 3. Filtragem e Limpeza dos Links
       const validLinks = sidebarLinks.filter(link => {
          const href = link.getAttribute('href');
          // Ignora links vazios, âncoras locais, emails e javascript
-         if (!href || href.startsWith('#') || href.startsWith('mailto') || href.startsWith('javascript')) return false;
+         if (!href || href.startsWith('mailto') || href.startsWith('javascript')) return false;
 
+         // FIX: Allow anchors if they have a hash! (Don't auto-reject #)
+         // Assuming resolveUrl handles them.
+         
          const urlObj = resolveUrl(href);
-         // Mantém apenas links no mesmo origin
          if (!urlObj || urlObj.origin !== baseOrigin) return false;
-         // Mantém apenas links do projeto/prefixo atual (evita navegar por outros projetos)
          if (!matchesProjectPrefix(urlObj)) return false;
          
-         // Ignora links que parecem ser de perfil/logout/settings se o texto for muito curto ou comum
          const text = link.textContent.trim().toLowerCase();
          if (['logout', 'sign out', 'settings', 'profile', 'home'].includes(text)) return false;
-         
-         // No Devin/DeepWiki, links de conteúdo geralmente não são apenas ícones (têm texto)
          if (text.length === 0) return false;
 
          return true;
       });
+      
+      console.log('[Batch Debug] Valid Links after filtering:', validLinks.length);
 
       // Remove duplicatas baseadas na URL
       const uniquePagesMap = new Map();
       validLinks.forEach(link => {
         const urlObj = resolveUrl(link.getAttribute('href'));
         if (!urlObj) return;
-        const fullUrl = urlObj.href;
+        const fullUrl = urlObj.href; // Includes Hash
         if (!uniquePagesMap.has(fullUrl)) {
             uniquePagesMap.set(fullUrl, {
                 url: fullUrl,
@@ -200,6 +229,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             });
         }
       });
+      
+      console.log('[Batch Debug] Unique Hashes/Pages:', uniquePagesMap.size);
 
       const pages = Array.from(uniquePagesMap.values());
       
@@ -245,11 +276,8 @@ function selectContentContainer() {
     document.querySelector("main .prose") ||
     document.querySelector("article .prose") ||
     document.querySelector(".prose") || // Tailwind typography standard
-    document.querySelector("article") || // Semantic HTML
-    document.querySelector("main") ||    // Semantic HTML
     document.querySelector(".markdown-body") || // GitHub style
-    document.querySelector(".wiki-content") ||  // Common wiki class
-    document.body // Ultimate fallback
+    document.querySelector(".wiki-content")   // Common wiki class
   );
 }
 
@@ -277,11 +305,71 @@ function getContentReadinessMetrics() {
     };
   }
 
-  const textLength = (container.textContent || "").trim().length;
-  const meaningfulCount = container.querySelectorAll(
+  // Helper to check if node is inside a navigation-like element
+  const isNavigational = (node) => {
+    return node.closest('nav, aside, header, footer, .sidebar, .menu, [class*="sidebar"], [class*="nav-"]');
+  };
+
+  // Calculate text length excluding navigation
+  let textLength = 0;
+  if (container === document.body) {
+    // If we fell back to body, we must be very careful to ignore sidebars
+    const walker = document.createTreeWalker(
+      container,
+      NodeFilter.SHOW_TEXT,
+      {
+        acceptNode: (node) => {
+          if (isNavigational(node.parentElement)) return NodeFilter.FILTER_REJECT;
+           // Ignore script/style tags content which might be huge
+          if (['SCRIPT', 'STYLE', 'NOSCRIPT'].includes(node.parentElement.tagName)) return NodeFilter.FILTER_REJECT;
+          return NodeFilter.FILTER_ACCEPT;
+        }
+      }
+    );
+    while (walker.nextNode()) {
+      textLength += walker.currentNode.textContent.trim().length;
+    }
+  } else {
+    // If we have a specific container, mostly trust it, but safeguard against sidebar inclusion
+    // (e.g. if the container WRAPS the sidebar)
+    textLength = (container.textContent || "").trim().length; 
+    // If the container itself IS the sidebar or contains it significantly, this might still be wrong, 
+    // but usually specific containers are the article content. 
+    // Let's apply a lighter filter just in case.
+    if (container.querySelector('nav, aside, .sidebar')) {
+       // Recalculate carefully if potential sidebar detected inside
+       textLength = 0;
+       const walker = document.createTreeWalker(
+        container,
+        NodeFilter.SHOW_TEXT,
+        {
+          acceptNode: (node) => {
+            if (isNavigational(node.parentElement)) return NodeFilter.FILTER_REJECT;
+            if (['SCRIPT', 'STYLE', 'NOSCRIPT'].includes(node.parentElement.tagName)) return NodeFilter.FILTER_REJECT;
+            return NodeFilter.FILTER_ACCEPT;
+          }
+        }
+      );
+      while (walker.nextNode()) {
+        textLength += walker.currentNode.textContent.trim().length;
+      }
+    }
+  }
+
+  // Filter meaningful elements
+  const allElements = container.querySelectorAll(
     "p, pre, code, table, ul, ol, h1, h2, h3, h4, h5, h6, svg[id^='mermaid-']"
-  ).length;
-  const hasMermaid = Boolean(container.querySelector("svg[id^='mermaid-'], pre code.language-mermaid"));
+  );
+  
+  let meaningfulCount = 0;
+  allElements.forEach(el => {
+    if (!isNavigational(el)) {
+      meaningfulCount++;
+    }
+  });
+
+  const hasMermaid = Boolean(Array.from(container.querySelectorAll("svg[id^='mermaid-'], pre code.language-mermaid"))
+    .some(el => !isNavigational(el)));
 
   return {
     hasContainer: true,

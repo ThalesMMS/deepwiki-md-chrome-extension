@@ -17,20 +17,34 @@ function isValidUrl(url) {
 function getProjectPrefix(urlString) {
   try {
     const url = new URL(urlString);
-    const segments = url.pathname.split('/').filter(Boolean);
+    const pathSegments = url.pathname.split('/').filter(Boolean);
 
-    const markers = new Set(['deepwiki', 'wiki', 'docs']);
-    const markerIdx = segments.findIndex(seg => markers.has(seg.toLowerCase()));
+    // If we have a clear marker like "wiki" or "docs", we want to grab everything up to that point
+    // plus the next 2 segments (Owner/Repo) usually.
+    // e.g. /wiki/Owner/Repo -> /wiki/Owner/Repo
+    const markerIdx = pathSegments.findIndex(seg => ['deepwiki', 'wiki', 'docs'].includes(seg.toLowerCase()));
+    
     if (markerIdx >= 0) {
-      const markerPrefixLength = Math.min(segments.length, markerIdx + 3);
-      return `/${segments.slice(0, markerPrefixLength).join('/')}`;
+       // Look for at least 2 segments after the marker (Owner/Project)
+       // If only 1 exists (Owner), we try to include it but prefer 2.
+       // The original logic was Math.min(segments.length, markerIdx + 3).
+       // Let's stick to that but ensure we don't cut off if we are DEEPER.
+       // Actually, the issue was that logic returned /wiki/ThalesMMS (marker+1) instead of marker+2
+       
+       // Improved logic: If we are at /wiki/Owner/Repo/Section..., we want /wiki/Owner/Repo
+       const segmentsAfterMarker = pathSegments.length - (markerIdx + 1);
+       if (segmentsAfterMarker >= 2) {
+           return `/${pathSegments.slice(0, markerIdx + 3).join('/')}`;
+       }
+       return `/${pathSegments.slice(0, markerIdx + 2).join('/')}`;
     }
 
-    if (segments.length >= 2) {
-      return `/${segments.slice(0, 2).join('/')}`;
+    // Fallbacks for paths without markers
+    if (pathSegments.length >= 2) {
+      return `/${pathSegments.slice(0, 2).join('/')}`;
     }
-    if (segments.length === 1) {
-      return `/${segments[0]}`;
+    if (pathSegments.length === 1) {
+      return `/${pathSegments[0]}`;
     }
     return '/';
   } catch (error) {
@@ -48,7 +62,9 @@ function filterPagesToProject(pages, currentUrl) {
     return pages || [];
   }
 
+  // Use the robust prefix calculation
   const prefix = getProjectPrefix(currentUrl);
+  
   if (!Array.isArray(pages) || pages.length === 0) {
     return [];
   }
@@ -64,10 +80,12 @@ function filterPagesToProject(pages, currentUrl) {
     }
   });
 
-  console.log('Batch page filtering:', {
-    extracted: pages.length,
-    filtered: filtered.length,
-    prefix
+  console.log('[Batch Debug] Filtering Report:', {
+    currentUrl: currentUrl,
+    derivedPrefix: prefix,
+    totalReceived: pages.length,
+    kept: filtered.length,
+    dropped: pages.length - filtered.length
   });
 
   return filtered;
@@ -203,6 +221,12 @@ function urlsRoughlyMatch(expectedUrl, actualUrl) {
     const expected = new URL(expectedUrl);
     const actual = new URL(actualUrl);
     if (expected.origin !== actual.origin) return false;
+    
+    // STRICT hash check for SPA navigation
+    if (expected.hash && expected.hash !== actual.hash) {
+        return false;
+    }
+
     return actual.pathname.startsWith(expected.pathname) ||
       expected.pathname.startsWith(actual.pathname);
   } catch (error) {
@@ -381,8 +405,58 @@ function waitForNavigation(tabId, expectedUrl) {
   });
 }
 
-function navigateToPage(tabId, url) {
+function isHashChange(currentUrl, targetUrl) {
+  if (!currentUrl || !targetUrl) return false;
+  try {
+    const curr = new URL(currentUrl);
+    const tgt = new URL(targetUrl);
+    const currPath = curr.pathname.replace(/\/$/, '');
+    const tgtPath = tgt.pathname.replace(/\/$/, '');
+    
+    return curr.origin === tgt.origin && 
+           currPath === tgtPath && 
+           curr.hash !== tgt.hash;
+  } catch (e) {
+    return false;
+  }
+}
+
+async function navigateToPage(tabId, url) {
+  const tab = await getTabById(tabId);
+  const hashOnly = isHashChange(tab.url, url);
+
   markTabPending(tabId);
+  
+  if (hashOnly) {
+     console.log('[Background] Hash change detected. Injecting location update script.');
+     try {
+       await chrome.scripting.executeScript({
+         target: { tabId },
+         func: (destUrl) => {
+           // Push state or set href? Set href with hash usually just scrolls.
+           // Let's try explicit hash setting if purely hash
+           const u = new URL(destUrl);
+           if (window.location.hash !== u.hash) {
+             window.location.hash = u.hash;
+           }
+         },
+         args: [url]
+       });
+       // Now wait for it to stick
+       await waitForTabUrl(tabId, url);
+     } catch (err) {
+       console.warn('Script navigation failed, falling back:', err);
+       return new Promise((resolve, reject) => {
+         chrome.tabs.update(tabId, { url }, () => {
+             // ... handling
+             if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+             else waitForTabUrl(tabId, url).then(resolve).catch(reject);
+         });
+       });
+     }
+     return;
+  }
+
   return new Promise((resolve, reject) => {
     chrome.tabs.update(tabId, { url }, () => {
       if (chrome.runtime.lastError) {
@@ -462,12 +536,15 @@ async function processSinglePage(page) {
 
   const fileName = getUniqueFileName(convertResponse.markdownTitle || page.title);
   batchState.convertedPages.push({ title: fileName, content: convertResponse.markdown });
+  
+  // Increment processed count
   batchState.processed += 1;
+  
   broadcastBatchUpdate('pageProcessed', {
     message: `Converted ${batchState.processed}/${batchState.total}: ${page.title}`
   });
 
-  // Pequeno respiro para evitar navegação agressiva demais
+  // Pequeno respiro
   await sleep(250);
 }
 
@@ -581,12 +658,17 @@ async function startBatchProcessing(tabId) {
 
   const tab = await getTabById(tabId);
   
+  console.log('[Background] startBatchProcessing called for tab:', tabId);
+  
   // ALTERADO AQUI
   if (!isValidUrl(tab.url)) {
+    console.error('[Background] Invalid URL:', tab.url);
     throw new Error('Please open a DeepWiki or Devin page before starting batch conversion.');
   }
 
+  console.log('[Background] Sending extractAllPages to content script...');
   const extraction = await sendMessageToTab(tabId, { action: 'extractAllPages' });
+  console.log('[Background] Extraction response:', extraction);
   if (!extraction || !extraction.success) {
     throw new Error(extraction?.error || 'Failed to extract sidebar links.');
   }

@@ -17,6 +17,14 @@ document.addEventListener('DOMContentLoaded', () => {
     return url.includes('deepwiki.com') || url.includes('devin.ai');
   }
 
+  // Helper to sanitize filenames
+  function sanitizeFilename(name) {
+    if (!name) return 'document';
+    // Replace characters that are not alphanumeric, underscore, hyphen, or period with an underscore
+    // Then replace multiple underscores with a single underscore
+    return name.replace(/[^a-z0-9_\-\.]/gi, '_').replace(/_+/g, '_');
+  }
+
   convertBtn.addEventListener('click', async () => {
     try {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -33,9 +41,14 @@ document.addEventListener('DOMContentLoaded', () => {
       if (response && response.success) {
         const headTitle = response.headTitle || '';
         const currentTitle = response.markdownTitle;
-        const fileName = headTitle
-          ? `${headTitle}-${currentTitle}.md`
-          : `${currentTitle}.md`;
+        
+        // Sanitize filename components
+        const sanitizedHeadTitle = sanitizeFilename(headTitle);
+        const sanitizedCurrentTitle = sanitizeFilename(currentTitle);
+
+        const fileName = sanitizedHeadTitle
+          ? `${sanitizedHeadTitle}-${sanitizedCurrentTitle}.md`
+          : `${sanitizedCurrentTitle}.md`;
 
         const blob = new Blob([response.markdown], { type: 'text/markdown' });
         const url = URL.createObjectURL(blob);
@@ -56,8 +69,10 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   batchDownloadBtn.addEventListener('click', async () => {
+    console.log('[Popup] Batch Convert button clicked!');
     try {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      console.log('[Popup] Active tab:', tab.url);
 
       // VERIFICAÇÃO ATUALIZADA
       if (!isValidSite(tab.url)) {
