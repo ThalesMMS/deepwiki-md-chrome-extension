@@ -5,15 +5,31 @@ const messageQueue = {};
 const CONTENT_READY_TIMEOUT = 20000;
 const CONTENT_READY_MIN_TEXT = 160;
 
+/**
+ * Pause execution for a specified duration.
+ * @param {number} ms - Duration to wait in milliseconds.
+ * @returns {Promise<void>} A promise that resolves after the specified delay.
+ */
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// Função auxiliar para validar URL no background também
+/**
+ * Determines whether a URL string refers to a supported site (deepwiki.com or devin.ai).
+ * @param {string} url - The URL string to validate.
+ * @returns {boolean} `true` if the URL is non-empty and contains 'deepwiki.com' or 'devin.ai', `false` otherwise.
+ */
 function isValidUrl(url) {
   return url && (url.includes('deepwiki.com') || url.includes('devin.ai'));
 }
 
+/**
+ * Derives the site-specific project path prefix from a page URL.
+ *
+ * For devin.ai this typically returns a prefix like `/wiki/{owner}`; for DeepWiki/other wikis it typically returns `/wiki/{owner}/{repo}`. Falls back to the first one or two path segments or `/` when markers are absent.
+ * @param {string} urlString - The full page URL to analyze.
+ * @returns {string|null} The project path prefix starting with `/` used to group pages by project, or `null` if the URL could not be parsed.
+ */
 function getProjectPrefix(urlString) {
   try {
     const url = new URL(urlString);
@@ -62,6 +78,17 @@ function getProjectPrefix(urlString) {
   }
 }
 
+/**
+ * Selects pages that belong to the same project/context as the provided current page URL.
+ *
+ * Filters the input pages to those that are same-origin and relevant to the current project:
+ * - For devin.ai pages: keeps only links whose path equals the current page's path (topics are treated as hash sections of the same page).
+ * - For other sites: keeps links whose path starts with a derived project prefix; if a prefix cannot be derived, keeps all same-origin links.
+ * If the provided currentUrl is invalid, a warning is logged and the original pages array (or an empty array if none) is returned.
+ *
+ * @param {Array<{url: string}>} pages - Array of page objects with a `url` property to be filtered.
+ * @param {string} currentUrl - The current page URL used to determine project scope.
+ * @returns {Array<{url: string}>} The subset of pages that belong to the same project/context.
 function filterPagesToProject(pages, currentUrl) {
   let base;
   try {
@@ -209,6 +236,12 @@ function shouldQueueForError(error) {
     error.message.includes('Could not establish connection');
 }
 
+/**
+ * Send a message to a tab, using direct delivery when possible and queueing the message if the tab is marked not ready or the error indicates the message should be retried later.
+ * @param {number} tabId - The target tab id.
+ * @param {any} message - The message payload to send to the tab.
+ * @returns {Promise<any>} The tab's response value; resolves when the message is delivered and the tab responds, or rejects if delivery fails with a non-queueable error.
+ */
 function sendMessageToTab(tabId, message) {
   const entry = messageQueue[tabId];
   const tryDirect = () => attemptDirectMessage(tabId, message);
@@ -236,6 +269,12 @@ function sendMessageToTab(tabId, message) {
   });
 }
 
+/**
+ * Determines whether two URLs refer to the same page context, allowing flexible path-prefix matches while enforcing exact hash equality when present.
+ * @param {string} expectedUrl - The reference URL; may be a prefix of the actual URL's path.
+ * @param {string} actualUrl - The URL to compare against the reference.
+ * @returns {boolean} `true` if either input is missing or unparsable, or if both origins match and one path starts with the other (and hashes match when the expected URL includes a hash); `false` otherwise.
+ */
 function urlsRoughlyMatch(expectedUrl, actualUrl) {
   if (!expectedUrl || !actualUrl) return true;
   try {
@@ -255,6 +294,14 @@ function urlsRoughlyMatch(expectedUrl, actualUrl) {
   }
 }
 
+/**
+ * Waits until a tab's URL roughly matches the given expected URL or fails when the timeout elapses.
+ * @param {number} tabId - The ID of the tab to monitor.
+ * @param {string} expectedUrl - The target URL to match; if falsy, the function resolves immediately.
+ * @param {number} [timeoutMs=30000] - Maximum time in milliseconds to wait before rejecting.
+ * @param {number} [intervalMs=200] - Polling interval in milliseconds between checks.
+ * @returns {Promise<void>} Resolves when the tab's URL matches `expectedUrl`; rejects with an Error if the tab cannot be accessed or the timeout is reached.
+ */
 function waitForTabUrl(tabId, expectedUrl, timeoutMs = MESSAGE_TIMEOUT, intervalMs = 200) {
   if (!expectedUrl) {
     return Promise.resolve();
@@ -288,6 +335,22 @@ function waitForTabUrl(tabId, expectedUrl, timeoutMs = MESSAGE_TIMEOUT, interval
   });
 }
 
+/**
+ * Broadcasts the current batch processing status to the extension runtime.
+ *
+ * Builds a payload containing the provided `type`, merged progress fields (processed, failed, total)
+ * from `data` or current batch state, the running flag (overridden when `overrideRunning` is boolean),
+ * cancelRequested, and optional message/level; stores it to `lastBatchReport` and sends it via runtime messaging.
+ *
+ * @param {string} type - The batch update type (e.g., 'started', 'progress', 'completed', 'error', 'cancelled').
+ * @param {Object} [data={}] - Optional fields to include or override in the payload.
+ * @param {number} [data.processed] - Number of pages processed so far.
+ * @param {number} [data.failed] - Number of pages that failed processing.
+ * @param {number} [data.total] - Total number of pages in the batch.
+ * @param {string} [data.message] - Human-readable message to include with the update.
+ * @param {string} [data.level] - Severity level for the message (defaults to 'info').
+ * @param {boolean} [overrideRunning] - When boolean, forces the `running` flag in the payload; otherwise uses current batch state.
+ */
 function broadcastBatchUpdate(type, data = {}, overrideRunning) {
   const running = typeof overrideRunning === 'boolean' ? overrideRunning : batchState.isRunning;
   const payload = {
@@ -366,6 +429,11 @@ function cancelBatchProcessing() {
   return true;
 }
 
+/**
+ * Navigate the batch's tab back to the original URL saved at batch start, if present.
+ *
+ * If an original URL is stored and a tab is associated with the current batch, attempts to navigate that tab to the saved URL. Clears the stored original URL regardless of success; navigation failures are caught and logged as warnings.
+ */
 async function restoreOriginalPage() {
   if (!batchState.tabId || !batchState.originalUrl) {
     return;
@@ -379,6 +447,12 @@ async function restoreOriginalPage() {
   }
 }
 
+/**
+ * Waits until the given tab finishes navigating to a URL that matches the expected target.
+ * @param {number} tabId - The ID of the tab to monitor.
+ * @param {string} expectedUrl - The target URL to match against the tab's navigation events.
+ * @returns {Promise<void>} Resolves when the tab completes navigation to a URL that roughly matches `expectedUrl`; rejects with an Error if navigation fails or a timeout occurs.
+ */
 function waitForNavigation(tabId, expectedUrl) {
   return new Promise((resolve, reject) => {
     const timeoutId = setTimeout(() => {
@@ -426,6 +500,12 @@ function waitForNavigation(tabId, expectedUrl) {
   });
 }
 
+/**
+ * Determines whether two URLs refer to the same resource but differ only by the fragment (hash).
+ * @param {string} currentUrl - The current URL string.
+ * @param {string} targetUrl - The target URL string.
+ * @returns {boolean} `true` if both URLs have the same origin and path and their hashes are different, `false` otherwise.
+ */
 function isHashChange(currentUrl, targetUrl) {
   if (!currentUrl || !targetUrl) return false;
   try {
@@ -442,6 +522,19 @@ function isHashChange(currentUrl, targetUrl) {
   }
 }
 
+/**
+ * Navigate the given tab to a target URL, using an in-page hash update when possible.
+ *
+ * If the change is a hash-only navigation, attempts to update window.location.hash in-page
+ * and waits for the tab's URL to reflect the change. For non-hash navigations, marks the tab
+ * as pending (to defer runtime messages) and performs a full tab update, then waits for
+ * navigation completion.
+ *
+ * @param {number} tabId - ID of the tab to navigate.
+ * @param {string} url - Destination URL to navigate the tab to.
+ * @returns {Promise<void>} Resolves when navigation and any required waiting for the tab URL complete.
+ * @throws {Error} If the tab update or the subsequent wait fails (e.g., chrome.runtime.lastError or timeout).
+ */
 async function navigateToPage(tabId, url) {
   const tab = await getTabById(tabId);
   const hashOnly = isHashChange(tab.url, url);
@@ -489,6 +582,12 @@ async function navigateToPage(tabId, url) {
   });
 }
 
+/**
+ * Waits for a tab's page content to reach readiness matching an expected URL.
+ * @param {number} tabId - ID of the tab to query.
+ * @param {string} expectedUrl - URL expected for the page whose content readiness is awaited.
+ * @returns {Object|null} Readiness data from the content script when content is ready, or `null` on timeout or error.
+ */
 async function waitForPageContent(tabId, expectedUrl) {
   try {
     const response = await sendMessageToTab(tabId, {
@@ -504,6 +603,16 @@ async function waitForPageContent(tabId, expectedUrl) {
   }
 }
 
+/**
+ * Detects whether converted Markdown appears suspiciously empty compared to page readiness signals.
+ * @param {string} markdown - The converted Markdown text to evaluate.
+ * @param {Object} readiness - Optional readiness object containing content metrics.
+ * @param {Object} readiness.metrics - Metrics about the page content.
+ * @param {number} readiness.metrics.textLength - Estimated text length of the source content.
+ * @param {number} readiness.metrics.meaningfulCount - Count of meaningful content elements detected.
+ * @param {boolean} readiness.metrics.hasMermaid - Whether the page contains Mermaid diagrams.
+ * @returns {boolean} `true` if the Markdown is likely too empty given the readiness metrics (or very short when metrics are absent), `false` otherwise.
+ */
 function isMarkdownSuspiciouslyEmpty(markdown, readiness) {
   const length = (markdown || '').trim().length;
   if (length >= 80) return false;
@@ -515,6 +624,18 @@ function isMarkdownSuspiciouslyEmpty(markdown, readiness) {
   return contentLooksSubstantial && length < 80;
 }
 
+/**
+ * Process a single page in the current batch: navigate or select the correct topic, wait for content readiness,
+ * convert the page to Markdown, store the result in batch state, and emit progress updates.
+ *
+ * @param {Object} page - Page descriptor with properties used for processing.
+ * @param {string} page.title - The page or topic title used for reporting and topic selection.
+ * @param {string} page.url - The full target URL for navigation or hash selection.
+ * @param {number} [page.devinIndex] - If present and an integer, indicates a Devin.ai topic index to select on the page.
+ * @param {string|number} [page.numberPrefix] - Optional prefix to prepend to the output file name.
+ *
+ * @throws {Error} If topic selection fails, conversion fails, retry conversion fails, or converted markdown is empty after retry.
+ */
 async function processSinglePage(page) {
   if (batchState.cancelRequested) return;
 
@@ -684,6 +805,14 @@ async function processSinglePage(page) {
   await sleep(250);
 }
 
+/**
+ * Create a ZIP archive containing all converted Markdown files and initiate a browser download.
+ *
+ * Builds an index README listing each page, adds each converted page as `TITLE.md` to the archive,
+ * compresses the archive, and starts a download named after the batch folder.
+ *
+ * @returns {Promise<void>} Resolves when the download has been initiated, rejects with an Error if the download API reports an error.
+ */
 async function createZipArchive() {
   const zip = new JSZip();
   let indexContent = `# ${batchState.folderName}\n\n## Content Index\n\n`;
@@ -718,6 +847,21 @@ async function createZipArchive() {
   });
 }
 
+/**
+ * Orchestrates processing of all pages in the current batch, producing a ZIP of converted files.
+ *
+ * Processes pages in sequence, updating batch progress and broadcasting status events. Stops early if
+ * batch cancellation is requested. If at least one page is converted, creates a ZIP archive and
+ * broadcasts completion; if no pages are converted, signals an error. Always resets batch state at
+ * the end of the run.
+ *
+ * Side effects:
+ * - Broadcasts batch lifecycle updates (started/processing/pageFailed/zipping/completed/cancelled/error).
+ * - May create and trigger a ZIP download for converted pages.
+ * - Resets the global batch state when finished.
+ *
+ * @throws {Error} If no pages were converted successfully.
+ */
 async function runBatchProcessing() {
   try {
     for (const page of batchState.pages) {
@@ -787,6 +931,14 @@ function getTabById(tabId) {
   });
 }
 
+/**
+ * Initiates a batch conversion of pages for the project associated with the given tab.
+ * @param {number} tabId - ID of the browser tab to start the batch from.
+ * @returns {{total: number, folderName: string}} Object containing the number of pages to convert and the chosen output folder name.
+ * @throws {Error} If a batch is already running.
+ * @throws {Error} If the tab's URL is not a supported DeepWiki or Devin page.
+ * @throws {Error} If extraction from the content script fails or no project pages are found.
+ */
 async function startBatchProcessing(tabId) {
   if (batchState.isRunning) {
     throw new Error('Batch conversion already running.');

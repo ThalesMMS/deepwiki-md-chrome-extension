@@ -12,12 +12,19 @@ document.addEventListener('DOMContentLoaded', () => {
 
   initializeBatchStatus();
 
-  // Função auxiliar para verificar se o site é válido
+  /**
+   * Determine whether a URL corresponds to a supported site (DeepWiki or Devin).
+   * @param {string} url - The URL to check.
+   * @returns {boolean} `true` if the URL contains `deepwiki.com` or `devin.ai`, `false` otherwise.
+   */
   function isValidSite(url) {
     return url.includes('deepwiki.com') || url.includes('devin.ai');
   }
 
-  // Helper to sanitize filenames
+  /**
+   * Normalize a string into a filesystem-safe filename component.
+   * @param {string} name - The input name to normalize; if falsy, `"document"` is used.
+   * @returns {string} The sanitized filename where characters other than letters, digits, underscore, hyphen, or period are replaced with underscores and consecutive underscores are collapsed.
   function sanitizeFilename(name) {
     if (!name) return 'document';
     // Replace characters that are not alphanumeric, underscore, hyphen, or period with an underscore
@@ -144,6 +151,11 @@ document.addEventListener('DOMContentLoaded', () => {
     batchDownloadBtn.disabled = disable;
   }
 
+  /**
+   * Update the status display text and apply a CSS class for the given status type.
+   * @param {string} message - Text to display in the status element.
+   * @param {string} type - CSS class name representing the status level (e.g., 'info', 'success', 'error').
+   */
   function showStatus(message, type) {
     status.textContent = message;
     status.className = type;
