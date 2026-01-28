@@ -38,6 +38,7 @@ function getElementTitle(element) {
  *
  * @param {Element} navRoot - Root DOM element to search for navigation toggles.
  * @returns {number} The number of toggle elements found and acted upon.
+ */
 function expandAllNavSections(navRoot) {
   const toggles = Array.from(navRoot.querySelectorAll(
     'button[aria-expanded="false"], [role="button"][aria-expanded="false"], details:not([open]) > summary, [data-state="closed"][aria-controls]'
@@ -63,6 +64,7 @@ function expandAllNavSections(navRoot) {
  * Searches likely navigation/sidebar containers, expands collapsible sections, and collects unique buttons that have a human-visible title. If none are found within common sidebar containers, falls back to scanning all list-item buttons on the page.
  *
  * @returns {HTMLButtonElement[]} An array of unique button elements that appear to be Devin.ai topic controls (buttons with a visible or accessible title).
+ */
 function findDevinTopicButtons() {
   const containers = Array.from(document.querySelectorAll(
     'aside, nav, [class*="border-r"], [class*="sidebar"], [class*="drawer"]'

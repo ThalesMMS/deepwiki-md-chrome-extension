@@ -25,6 +25,7 @@ document.addEventListener('DOMContentLoaded', () => {
    * Normalize a string into a filesystem-safe filename component.
    * @param {string} name - The input name to normalize; if falsy, `"document"` is used.
    * @returns {string} The sanitized filename where characters other than letters, digits, underscore, hyphen, or period are replaced with underscores and consecutive underscores are collapsed.
+   */
   function sanitizeFilename(name) {
     if (!name) return 'document';
     // Replace characters that are not alphanumeric, underscore, hyphen, or period with an underscore

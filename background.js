@@ -89,6 +89,7 @@ function getProjectPrefix(urlString) {
  * @param {Array<{url: string}>} pages - Array of page objects with a `url` property to be filtered.
  * @param {string} currentUrl - The current page URL used to determine project scope.
  * @returns {Array<{url: string}>} The subset of pages that belong to the same project/context.
+ */
 function filterPagesToProject(pages, currentUrl) {
   let base;
   try {
