@@ -54,7 +54,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const sanitizedHeadTitle = sanitizeFilename(headTitle);
         const sanitizedCurrentTitle = sanitizeFilename(currentTitle);
 
-        const fileName = sanitizedHeadTitle
+        const fileName = headTitle
           ? `${sanitizedHeadTitle}-${sanitizedCurrentTitle}.md`
           : `${sanitizedCurrentTitle}.md`;
 

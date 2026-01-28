@@ -181,6 +181,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       // --- ESTRATÉGIA DE SELEÇÃO DE CONTEÚDO (Ultra Robusta) ---
       // Prioriza containers semânticos ou específicos de documentação
       const contentContainer = selectContentContainer();
+      if (!contentContainer) {
+        throw new Error('Unable to locate main content for conversion. Please make sure the page has loaded.');
+      }
 
       let markdown = ``;
       let markdownTitle = title.replace(/\s+/g, '-');
