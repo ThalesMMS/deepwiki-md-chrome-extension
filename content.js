@@ -107,13 +107,12 @@ function applyNumberPrefixes(pages) {
     counts[depth] += 1;
     counts.splice(depth + 1);
 
+    const top = String(counts[0]).padStart(2, '0');
     if (depth === 0) {
-      const top = String(counts[0]).padStart(2, '0');
       page.numberPrefix = top;
     } else {
-      const top = String(counts[0]).padStart(2, '0');
       const subParts = counts.slice(1).map(n => String(n));
-      page.numberPrefix = [top, ...subParts].join('-');
+      page.numberPrefix = `${top}.${subParts.join('.')}`;
     }
   });
 
