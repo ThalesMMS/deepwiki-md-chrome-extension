@@ -553,12 +553,16 @@ async function processSinglePage(page) {
   });
 
   let readiness = null;
+  let devinSignature = null;
 
   if (isDevinTopic) {
     if (!samePage) {
       console.log('[Background] Devin topic: navigating to base page:', page.url);
       await navigateToPage(batchState.tabId, page.url);
     }
+
+    const signatureResponse = await sendMessageToTab(batchState.tabId, { action: 'getContentSignature' });
+    devinSignature = signatureResponse?.signature || null;
 
     const selection = await sendMessageToTab(batchState.tabId, {
       action: 'selectDevinTopic',
@@ -569,7 +573,26 @@ async function processSinglePage(page) {
       throw new Error(selection?.error || 'Failed to select Devin topic.');
     }
 
-    readiness = await waitForPageContent(batchState.tabId, page.url);
+    // Give the page a moment to start rendering the new topic
+    await sleep(350);
+
+    const topicReady = await sendMessageToTab(batchState.tabId, {
+      action: 'waitForTopicReady',
+      expectedTitle: page.title,
+      previousSignature: devinSignature,
+      timeoutMs: CONTENT_READY_TIMEOUT,
+      minTextLength: CONTENT_READY_MIN_TEXT
+    });
+
+    if (topicReady?.timedOut) {
+      console.warn('[Background] Devin topic readiness timed out:', {
+        title: page.title,
+        url: page.url,
+        details: topicReady
+      });
+    }
+
+    readiness = topicReady;
   } else {
     if (samePage) {
       // Same page - use hash navigation (no page reload)
@@ -623,7 +646,15 @@ async function processSinglePage(page) {
       readiness
     });
     await sleep(900);
-    const retryReadiness = await waitForPageContent(batchState.tabId, page.url);
+    const retryReadiness = isDevinTopic
+      ? await sendMessageToTab(batchState.tabId, {
+        action: 'waitForTopicReady',
+        expectedTitle: page.title,
+        previousSignature: devinSignature,
+        timeoutMs: CONTENT_READY_TIMEOUT,
+        minTextLength: CONTENT_READY_MIN_TEXT
+      })
+      : await waitForPageContent(batchState.tabId, page.url);
     const retryResponse = await sendMessageToTab(batchState.tabId, { action: 'convertToMarkdown' });
     if (retryResponse && retryResponse.success) {
       convertResponse = retryResponse;

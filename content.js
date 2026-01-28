@@ -506,6 +506,24 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       }
     })();
     return true;
+  } else if (request.action === "getContentSignature") {
+    try {
+      const signature = getContentSignature();
+      const metrics = getContentReadinessMetrics();
+      sendResponse({ success: true, signature, metrics, currentUrl: window.location.href });
+    } catch (error) {
+      console.error('Error getting content signature:', error);
+      sendResponse({ success: false, error: error.message });
+    }
+    return true;
+  } else if (request.action === "waitForTopicReady") {
+    waitForTopicReady(request)
+      .then(response => sendResponse(response))
+      .catch(error => {
+        console.error('waitForTopicReady error:', error);
+        sendResponse({ ready: false, error: error.message });
+      });
+    return true;
   } else if (request.action === "waitForContentReady") {
     waitForContentReady(request)
       .then(response => sendResponse(response))
@@ -635,6 +653,29 @@ function getContentReadinessMetrics() {
   };
 }
 
+function getContentSignature() {
+  const container = selectContentContainer();
+  if (!container) {
+    return {
+      heading: '',
+      snippet: '',
+      textLength: 0,
+      hash: window.location.hash || ''
+    };
+  }
+
+  const heading = container.querySelector('h1, h2, h3')?.textContent?.trim() || '';
+  const rawText = (container.textContent || '').replace(/\s+/g, ' ').trim();
+  const snippet = rawText.slice(0, 240);
+
+  return {
+    heading,
+    snippet,
+    textLength: rawText.length,
+    hash: window.location.hash || ''
+  };
+}
+
 async function waitForContentReady(options = {}) {
   const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 20000;
   const intervalMs = Number(options.intervalMs) > 0 ? Number(options.intervalMs) : 250;
@@ -672,6 +713,61 @@ async function waitForContentReady(options = {}) {
           metrics,
           currentUrl: window.location.href,
           expectedUrl
+        });
+        return;
+      }
+
+      setTimeout(tick, intervalMs);
+    };
+
+    tick();
+  });
+}
+
+async function waitForTopicReady(options = {}) {
+  const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 8000;
+  const intervalMs = Number(options.intervalMs) > 0 ? Number(options.intervalMs) : 200;
+  const minTextLength = Number(options.minTextLength) > 0 ? Number(options.minTextLength) : 160;
+  const expectedTitle = (options.expectedTitle || '').trim();
+  const previousSignature = options.previousSignature || null;
+
+  const start = Date.now();
+  const deadline = start + timeoutMs;
+
+  const normalizedExpected = expectedTitle.toLowerCase();
+
+  return new Promise(resolve => {
+    const tick = () => {
+      const metrics = getContentReadinessMetrics();
+      const signature = getContentSignature();
+
+      const headingNormalized = (signature.heading || '').toLowerCase();
+      const titleMatched = normalizedExpected &&
+        (headingNormalized === normalizedExpected || headingNormalized.includes(normalizedExpected));
+
+      const previousSnippet = previousSignature?.snippet || '';
+      const previousLength = previousSignature?.textLength || 0;
+      const snippetChanged = Boolean(signature.snippet && signature.snippet !== previousSnippet);
+      const lengthChanged = Math.abs(signature.textLength - previousLength) > 40;
+
+      const contentLooksSubstantial =
+        metrics.textLength >= minTextLength ||
+        metrics.meaningfulCount >= 6 ||
+        metrics.hasMermaid;
+
+      const ready =
+        metrics.hasContainer &&
+        (titleMatched || snippetChanged || lengthChanged) &&
+        (contentLooksSubstantial || metrics.meaningfulCount >= 3);
+
+      if (ready || Date.now() >= deadline) {
+        resolve({
+          ready,
+          timedOut: !ready,
+          metrics,
+          signature,
+          expectedTitle,
+          currentUrl: window.location.href
         });
         return;
       }
