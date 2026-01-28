@@ -1,3 +1,8 @@
+/**
+ * Produce a canonical URL string by normalizing origin, pathname (ensuring "/" for root), search, and hash.
+ * @param {URL|{href: string}} urlObj - A URL instance or an object with an `href` property pointing to a URL.
+ * @returns {string} The normalized URL string; if normalization fails, returns the original `href`.
+ */
 function normalizeUrlKey(urlObj) {
   try {
     const normalized = new URL(urlObj.href);
@@ -9,6 +14,13 @@ function normalizeUrlKey(urlObj) {
   }
 }
 
+/**
+ * Extracts a human-readable title from a DOM element.
+ *
+ * Checks visible text content first, then `aria-label`, `title`, or `data-title` attributes, and finally an inner `<img>`'s `alt` attribute.
+ * @param {Element} element - The DOM element to extract a title from.
+ * @returns {string} The extracted title trimmed of excess whitespace, or an empty string if no suitable title is found.
+ */
 function getElementTitle(element) {
   const rawText = (element.textContent || '').replace(/\s+/g, ' ').trim();
   if (rawText) return rawText;
@@ -18,6 +30,14 @@ function getElementTitle(element) {
   return imgAlt ? imgAlt.trim() : '';
 }
 
+/**
+ * Expand all collapsible navigation sections within a root container.
+ *
+ * Searches the provided root for closed navigation toggles (buttons or elements with role="button" and aria-expanded="false",
+ * non-open <details> summaries, and elements with data-state="closed" that control aria-controls) and opens them.
+ *
+ * @param {Element} navRoot - Root DOM element to search for navigation toggles.
+ * @returns {number} The number of toggle elements found and acted upon.
 function expandAllNavSections(navRoot) {
   const toggles = Array.from(navRoot.querySelectorAll(
     'button[aria-expanded="false"], [role="button"][aria-expanded="false"], details:not([open]) > summary, [data-state="closed"][aria-controls]'
@@ -37,6 +57,12 @@ function expandAllNavSections(navRoot) {
   return toggles.length;
 }
 
+/**
+ * Locate interactive topic controls commonly used by Devin.ai in page sidebars.
+ *
+ * Searches likely navigation/sidebar containers, expands collapsible sections, and collects unique buttons that have a human-visible title. If none are found within common sidebar containers, falls back to scanning all list-item buttons on the page.
+ *
+ * @returns {HTMLButtonElement[]} An array of unique button elements that appear to be Devin.ai topic controls (buttons with a visible or accessible title).
 function findDevinTopicButtons() {
   const containers = Array.from(document.querySelectorAll(
     'aside, nav, [class*="border-r"], [class*="sidebar"], [class*="drawer"]'
@@ -64,6 +90,14 @@ function findDevinTopicButtons() {
   return Array.from(document.querySelectorAll('ul li button')).filter(btn => getElementTitle(btn));
 }
 
+/**
+ * Determine the nesting depth of a list item relative to top-level list items.
+ *
+ * Uses the list item's left padding when available to estimate depth (each ~12px = one level); if padding is not determinable, falls back to counting nested UL/OL ancestors. Returns 0 for top-level items or when depth cannot be determined.
+ *
+ * @param {Element} element - An element contained within a list item (`<li>`).
+ * @returns {number} The estimated non-negative integer depth (0 for top-level).
+ */
 function getListItemDepth(element) {
   const li = element.closest('li');
   if (!li) return 0;
@@ -93,6 +127,13 @@ function getListItemDepth(element) {
   return 0;
 }
 
+/**
+ * Assigns hierarchical numeric prefixes to pages based on their depth.
+ * Each page receives a `numberPrefix` string representing its position in a depth-aware counter (e.g. top-level "01", nested "01.2.3").
+ *
+ * @param {Array<Object>} pages - Array of page objects. Each page may include a numeric `depth` property; this function sets or replaces `page.numberPrefix`.
+ * @returns {Array<Object>} The same `pages` array with `numberPrefix` assigned to each page. Top-level prefixes are two-digit zero-padded.
+ */
 function applyNumberPrefixes(pages) {
   const counts = [];
 
@@ -222,6 +263,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
       const prefixList = Array.from(prefixCandidates).sort((a, b) => b.length - a.length);
 
+      /**
+       * Resolve a possibly relative href against the module's baseUrl and return an absolute URL object.
+       * @param {string} href - The input URL or relative path to resolve.
+       * @returns {URL|null} The resolved URL object, or `null` if `href` is not a valid URL.
+       */
       function resolveUrl(href) {
         try {
           return new URL(href, baseUrl);
@@ -233,6 +279,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       // Use the computed default prefix directly - it already accounts for site-specific structure
       const bestPrefix = defaultPrefix;
 
+      /**
+       * Determines whether the given URL's pathname begins with the current project prefix.
+       *
+       * If no project prefix is configured, this function treats every URL as a match.
+       *
+       * @param {object|null} urlObj - Object with a `pathname` string (for example a `URL` or location-like object). If falsy, the function returns `false`.
+       * @returns {boolean} `true` if the pathname starts with the configured project prefix or if no prefix is configured, `false` otherwise.
+       */
       function matchesProjectPrefix(urlObj) {
         if (!urlObj) return false;
         if (!bestPrefix) return true;
@@ -603,6 +657,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   return true;
 });
 
+/**
+ * Selects the primary content container element using a set of common site selectors.
+ * @returns {Element|null} The first matching content container element, or `null` if none is found.
+ */
 function selectContentContainer() {
   return (
     document.querySelector(".container > div:nth-child(2) .prose") ||
@@ -616,6 +674,16 @@ function selectContentContainer() {
   );
 }
 
+/**
+ * Checks whether the current page's URL roughly matches an expected URL.
+ *
+ * Compares origins and requires the current pathname to start with the expected pathname;
+ * query string and hash are ignored. If `expectedUrl` is falsy or cannot be parsed, the function
+ * treats it as a match.
+ *
+ * @param {string|undefined|null} expectedUrl - The expected URL to match against; may be a full URL or falsy.
+ * @returns {boolean} `true` if the current location is considered a match for `expectedUrl`, `false` otherwise.
+ */
 function urlsRoughlyMatch(expectedUrl) {
   if (!expectedUrl) return true;
   try {
@@ -629,6 +697,14 @@ function urlsRoughlyMatch(expectedUrl) {
   }
 }
 
+/**
+ * Assess the page's main content readiness by locating a content container, measuring its visible text length, counting meaningful content blocks, and detecting Mermaid diagrams.
+ * @returns {{hasContainer: boolean, textLength: number, meaningfulCount: number, hasMermaid: boolean}} An object with:
+ *  - hasContainer: `true` if a content container was found, `false` otherwise.
+ *  - textLength: the length (number of characters) of visible text within the chosen container, excluding navigational and script/style content.
+ *  - meaningfulCount: the number of non-navigational block/content elements (paragraphs, code/pre blocks, tables, lists, headings, or mermaid SVGs) detected.
+ *  - hasMermaid: `true` if Mermaid-related elements are present inside the chosen container, `false` otherwise.
+ */
 function getContentReadinessMetrics() {
   const container = selectContentContainer();
   if (!container) {
@@ -714,6 +790,17 @@ function getContentReadinessMetrics() {
   };
 }
 
+/**
+ * Create a compact signature of the page's primary content for quick comparison or display.
+ *
+ * If no content container is found, returns empty heading/snippet and a textLength of 0 (hash is still provided).
+ *
+ * @returns {{heading: string, snippet: string, textLength: number, hash: string}} An object containing:
+ *  - heading: trimmed text of the first heading element (h1, h2, or h3) within the content container, or `''` if none.
+ *  - snippet: the first 240 characters of container text with normalized whitespace.
+ *  - textLength: total length of the container's normalized text.
+ *  - hash: the current window.location.hash or `''` if none.
+ */
 function getContentSignature() {
   const container = selectContentContainer();
   if (!container) {
@@ -737,6 +824,22 @@ function getContentSignature() {
   };
 }
 
+/**
+ * Waits for the page content to meet basic readiness criteria or for a timeout.
+ *
+ * @param {Object} [options] - Optional configuration.
+ * @param {number} [options.timeoutMs=20000] - Maximum wait time in milliseconds.
+ * @param {number} [options.intervalMs=250] - Polling interval in milliseconds.
+ * @param {number} [options.minTextLength=160] - Minimum text length considered "ready".
+ * @param {string} [options.expectedUrl=""] - Expected URL prefix used for rough URL matching.
+ * @returns {Object} An object describing readiness:
+ *  - ready: `true` if the content met readiness criteria, `false` otherwise.
+ *  - timedOut: `true` if the wait ended due to timeout without meeting criteria.
+ *  - urlOk: `true` if the current URL roughly matches `expectedUrl`.
+ *  - metrics: the object returned by `getContentReadinessMetrics()`.
+ *  - currentUrl: the current page URL.
+ *  - expectedUrl: the `expectedUrl` passed in options.
+ */
 async function waitForContentReady(options = {}) {
   const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 20000;
   const intervalMs = Number(options.intervalMs) > 0 ? Number(options.intervalMs) : 250;
@@ -785,6 +888,23 @@ async function waitForContentReady(options = {}) {
   });
 }
 
+/**
+ * Waits until a topic's content appears to be updated and substantial, or until a timeout elapses.
+ *
+ * @param {Object} [options] - Configuration for the readiness check.
+ * @param {number} [options.timeoutMs=8000] - Maximum time to wait in milliseconds.
+ * @param {number} [options.intervalMs=200] - Polling interval in milliseconds.
+ * @param {number} [options.minTextLength=160] - Minimum text length considered "substantial".
+ * @param {string} [options.expectedTitle] - Optional expected heading/title to match.
+ * @param {Object} [options.previousSignature] - Optional previous content signature to detect changes (should contain `snippet` and `textLength`).
+ * @returns {Object} An object with readiness results:
+ *   - ready {boolean} — `true` if content is considered ready, `false` otherwise.
+ *   - timedOut {boolean} — `true` if the wait ended due to timeout without readiness.
+ *   - metrics {Object} — metrics from getContentReadinessMetrics().
+ *   - signature {Object} — current content signature from getContentSignature().
+ *   - expectedTitle {string} — the provided expectedTitle (possibly empty).
+ *   - currentUrl {string} — the current page URL.
+ */
 async function waitForTopicReady(options = {}) {
   const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 8000;
   const intervalMs = Number(options.intervalMs) > 0 ? Number(options.intervalMs) : 200;
@@ -1141,7 +1261,12 @@ const DeepWikiFixer = {
   }
 };
 
-// Function for Flowchart (ensure this exists from previous responses)
+/**
+ * Convert an SVG flowchart into Mermaid flowchart syntax.
+ *
+ * @param {SVGElement|null} svgElement - Root SVG element containing the flowchart; may be null.
+ * @returns {string|null} A fenced Mermaid code block representing the flowchart (including nodes, clusters/subgraphs, edges, labels, and arrow styles), or `null` if conversion is not possible.
+ */
 function convertFlowchartSvgToMermaidText(svgElement) {
   if (!svgElement) return null;
 
@@ -1272,6 +1397,11 @@ function convertFlowchartSvgToMermaidText(svgElement) {
         };
     });
   
+  /**
+   * Determine the mermaid-style arrow string for an SVG path based on its CSS pattern class and presence of a start marker.
+   * @param {SVGElement|Element} pathEl - The SVG path element to inspect for pattern classes and `marker-start`.
+   * @returns {string} One of `"-->"`, `"-.->"`, or `"-..->"`, or the corresponding symmetric variants (`"<-->"`, `"<-.->"`, `"<-..->"`) when the element has a `marker-start`.
+   */
   function getArrowForPath(pathEl) {
       const cls = pathEl.getAttribute('class') || '';
       let arrow = '-->';
@@ -1416,6 +1546,12 @@ function convertFlowchartSvgToMermaidText(svgElement) {
     const edgeKey = (source, target) => `${source}::${target}`;
     const edgeSet = new Set(edges.map(edge => edgeKey(edge.source, edge.target)));
 
+    /**
+     * Normalize an arrow string to a dashed variant when dashed style is requested.
+     * @param {string} baseArrow - The original arrow string.
+     * @param {boolean} useDashed - If true, convert the arrow to a dashed form; if false, return the original.
+     * @returns {string} The normalized arrow: the original when `useDashed` is false; if `useDashed` is true, preserve arrows already containing `-..->`, map bidirectional forms (`<-->`, `<-.->`, `<-..->`) to `<-.->`, and otherwise return `-.->`.
+     */
     function normalizeArrowForStyle(baseArrow, useDashed) {
         if (!useDashed) return baseArrow;
         if (baseArrow.includes('-..->')) {
@@ -2812,7 +2948,12 @@ function processNode(node) {
   return resultMd;
 }
 
-// Function to auto-detect programming language from code content
+/**
+ * Heuristically detect the programming or markup language of a code/text snippet.
+ *
+ * @param {string} codeText - Source code or text to analyze for language cues.
+ * @returns {string} The detected language identifier (e.g., `javascript`, `python`, `json`, `markdown`, `dockerfile`, etc.), or an empty string if no language could be determined.
+ */
 function detectCodeLanguage(codeText) {
   if (!codeText || codeText.trim().length < 10) return '';
   

@@ -1,4 +1,3 @@
-
 // Mocking DOM environment
 const Node = {
   ELEMENT_NODE: 1,
@@ -124,14 +123,25 @@ const document = {
   }
 };
 
-// --- CUT HERE: Paste contents of functions to test ---
+/**
+ * Selects the primary content container used for content-readiness calculations.
+ * @returns {Element} The chosen container element; in this test harness it defaults to `document.body`.
+ */
 
 function selectContentContainer() {
     // simplified for test: usually returns body if nothing else matches
     return document.body;
 }
 
-// PASTE START: The updated function
+/**
+ * Compute readiness metrics for the selected content container.
+ *
+ * @returns {{hasContainer: boolean, textLength: number, meaningfulCount: number, hasMermaid: boolean}} An object describing the container and its content:
+ *  - hasContainer: `true` if a content container was found, `false` otherwise.
+ *  - textLength: total number of characters of non-navigational, visible text within the container.
+ *  - meaningfulCount: number of non-navigational elements considered meaningful (e.g., paragraphs, pre, code, tables, lists, headings, mermaid SVGs).
+ *  - hasMermaid: `true` if mermaid diagrams are present in the container, `false` otherwise.
+ */
 function getContentReadinessMetrics() {
   const container = selectContentContainer();
   if (!container) {
@@ -217,7 +227,13 @@ function getContentReadinessMetrics() {
 }
 // PASTE END
 
-// --- TEST CASES ---
+/**
+ * Execute in-file tests that validate content readiness calculations using a mocked DOM.
+ *
+ * Constructs two mock scenarios (sidebar-only and sidebar-plus-content), invokes getContentReadinessMetrics(),
+ * checks expected text length and meaningful element counts, logs PASS/FAIL outcomes to the console,
+ * and mutates document.body during the tests.
+ */
 
 function runTests() {
     console.log("Running Tests...");
