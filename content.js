@@ -122,34 +122,40 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       const currentPathNormalized = currentPath.replace(/\/$/, '');
 
       // For Devin.ai: Topics are hash sections on the same page
-      // Search the ENTIRE document for links pointing to current page (with any hash or no hash)
+      // Search entire document for numeric hash links (topic links)
       if (isDevinAi) {
-        console.log('[Batch Debug] Devin.ai mode: Searching for ALL links to current page...');
+        console.log('[Batch Debug] Devin.ai mode: Searching for numeric hash topic links...');
 
-        // Find ALL links in the document that point to the current page
+        // Find ALL links in the document
         const allLinks = Array.from(document.querySelectorAll('a[href]'));
-        const samePageLinks = allLinks.filter(link => {
+
+        // Filter to only topic links (numeric hash patterns like #2, #3, #3.1)
+        const topicLinks = allLinks.filter(link => {
           const href = link.getAttribute('href');
           if (!href) return false;
 
-          // Direct hash links like #2, #3, #section-name, etc.
-          if (href.startsWith('#')) return true;
+          // Direct hash links like #2, #3, #3.1, #7, etc. (numeric, optionally with dots)
+          if (href.match(/^#\d[\d.]*$/)) return true;
 
-          // Full URL links to current page (with or without hash)
+          // Full URL links to current page
           const urlObj = resolveUrl(href);
           if (!urlObj) return false;
           const linkPathNormalized = urlObj.pathname.replace(/\/$/, '');
 
-          // Must be same page path
-          return linkPathNormalized === currentPathNormalized;
+          if (linkPathNormalized === currentPathNormalized) {
+            // Include base URL (first topic) or links with numeric hashes
+            if (!urlObj.hash) return true; // Base URL = first topic
+            return urlObj.hash.match(/^#\d[\d.]*$/); // Numeric hash
+          }
+          return false;
         });
 
-        console.log('[Batch Debug] Found same-page links:', samePageLinks.length);
-        if (samePageLinks.length > 0) {
-          console.log('[Batch Debug] Sample links:', samePageLinks.slice(0, 10).map(l => l.getAttribute('href')));
+        console.log('[Batch Debug] Found topic links:', topicLinks.length);
+        if (topicLinks.length > 0) {
+          console.log('[Batch Debug] Sample links:', topicLinks.slice(0, 10).map(l => l.getAttribute('href')));
         }
 
-        sidebarLinks = samePageLinks;
+        sidebarLinks = topicLinks;
       } else {
         // DeepWiki: Use nav container selection
         const navContainers = Array.from(

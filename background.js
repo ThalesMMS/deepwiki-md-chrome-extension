@@ -852,10 +852,37 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     return;
   }
 
-  // Marque como pending apenas no início da navegação (ou quando a URL muda).
-  // Marcar em "complete" pode sobrescrever um contentScriptReady já recebido.
-  if (changeInfo.status === 'loading' || changeInfo.url) {
+  // Only mark as pending for actual page navigation, NOT hash-only changes
+  // Hash-only changes don't reload the content script, so we shouldn't block messages
+  if (changeInfo.status === 'loading') {
     markTabPending(tabId);
+  } else if (changeInfo.url) {
+    // Check if this is just a hash change (same page, different hash)
+    const entry = messageQueue[tabId];
+    if (entry && entry.lastUrl) {
+      try {
+        const oldUrl = new URL(entry.lastUrl);
+        const newUrl = new URL(changeInfo.url);
+        const sameBase = oldUrl.origin === newUrl.origin &&
+                         oldUrl.pathname === newUrl.pathname;
+        if (sameBase) {
+          // Hash-only change - don't mark as pending
+          console.log('[Background] Hash-only URL change, not marking pending:', changeInfo.url);
+        } else {
+          markTabPending(tabId);
+        }
+      } catch (e) {
+        markTabPending(tabId);
+      }
+    } else {
+      markTabPending(tabId);
+    }
+    // Store the URL for future comparison
+    if (!messageQueue[tabId]) {
+      messageQueue[tabId] = { isReady: true, queue: [], lastUrl: changeInfo.url };
+    } else {
+      messageQueue[tabId].lastUrl = changeInfo.url;
+    }
   }
 
   if (changeInfo.status === 'complete') {
