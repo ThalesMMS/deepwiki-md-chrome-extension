@@ -1,31 +1,189 @@
+/**
+ * Produce a canonical URL string by normalizing origin, pathname (ensuring "/" for root), search, and hash.
+ * @param {URL|{href: string}} urlObj - A URL instance or an object with an `href` property pointing to a URL.
+ * @returns {string} The normalized URL string; if normalization fails, returns the original `href`.
+ */
+function normalizeUrlKey(urlObj) {
+  try {
+    const normalized = new URL(urlObj.href);
+    const path = normalized.pathname.replace(/\/$/, '');
+    normalized.pathname = path === '' ? '/' : path;
+    return `${normalized.origin}${normalized.pathname}${normalized.search}${normalized.hash}`;
+  } catch (e) {
+    return urlObj.href;
+  }
+}
+
+/**
+ * Extracts a human-readable title from a DOM element.
+ *
+ * Checks visible text content first, then `aria-label`, `title`, or `data-title` attributes, and finally an inner `<img>`'s `alt` attribute.
+ * @param {Element} element - The DOM element to extract a title from.
+ * @returns {string} The extracted title trimmed of excess whitespace, or an empty string if no suitable title is found.
+ */
+function getElementTitle(element) {
+  const rawText = (element.textContent || '').replace(/\s+/g, ' ').trim();
+  if (rawText) return rawText;
+  const aria = element.getAttribute('aria-label') || element.getAttribute('title') || element.getAttribute('data-title');
+  if (aria) return aria.trim();
+  const imgAlt = element.querySelector('img[alt]')?.getAttribute('alt');
+  return imgAlt ? imgAlt.trim() : '';
+}
+
+/**
+ * Expand all collapsible navigation sections within a root container.
+ *
+ * Searches the provided root for closed navigation toggles (buttons or elements with role="button" and aria-expanded="false",
+ * non-open <details> summaries, and elements with data-state="closed" that control aria-controls) and opens them.
+ *
+ * @param {Element} navRoot - Root DOM element to search for navigation toggles.
+ * @returns {number} The number of toggle elements found and acted upon.
+ */
+function expandAllNavSections(navRoot) {
+  const toggles = Array.from(navRoot.querySelectorAll(
+    'button[aria-expanded="false"], [role="button"][aria-expanded="false"], details:not([open]) > summary, [data-state="closed"][aria-controls]'
+  )).filter(el => el.tagName !== 'A');
+
+  toggles.forEach(toggle => {
+    if (toggle.tagName === 'SUMMARY') {
+      const details = toggle.closest('details');
+      if (details && !details.open) {
+        details.open = true;
+      }
+    } else if (typeof toggle.click === 'function') {
+      toggle.click();
+    }
+  });
+
+  return toggles.length;
+}
+
+/**
+ * Locate interactive topic controls commonly used by Devin.ai in page sidebars.
+ *
+ * Searches likely navigation/sidebar containers, expands collapsible sections, and collects unique buttons that have a human-visible title. If none are found within common sidebar containers, falls back to scanning all list-item buttons on the page.
+ *
+ * @returns {HTMLButtonElement[]} An array of unique button elements that appear to be Devin.ai topic controls (buttons with a visible or accessible title).
+ */
+function findDevinTopicButtons() {
+  const containers = Array.from(document.querySelectorAll(
+    'aside, nav, [class*="border-r"], [class*="sidebar"], [class*="drawer"]'
+  ));
+
+  const buttons = [];
+  const seen = new Set();
+  containers.forEach(container => {
+    expandAllNavSections(container);
+    const listButtons = Array.from(container.querySelectorAll('ul li button'));
+    listButtons.forEach(btn => {
+      const title = getElementTitle(btn);
+      if (title && !seen.has(btn)) {
+        seen.add(btn);
+        buttons.push(btn);
+      }
+    });
+  });
+
+  if (buttons.length) {
+    return buttons;
+  }
+
+  // Fallback: any buttons inside list items
+  return Array.from(document.querySelectorAll('ul li button')).filter(btn => getElementTitle(btn));
+}
+
+/**
+ * Determine the nesting depth of a list item relative to top-level list items.
+ *
+ * Uses the list item's left padding when available to estimate depth (each ~12px = one level); if padding is not determinable, falls back to counting nested UL/OL ancestors. Returns 0 for top-level items or when depth cannot be determined.
+ *
+ * @param {Element} element - An element contained within a list item (`<li>`).
+ * @returns {number} The estimated non-negative integer depth (0 for top-level).
+ */
+function getListItemDepth(element) {
+  const li = element.closest('li');
+  if (!li) return 0;
+
+  let paddingValue = '';
+  if (li.style && li.style.paddingLeft) {
+    paddingValue = li.style.paddingLeft;
+  } else {
+    try {
+      paddingValue = window.getComputedStyle(li).paddingLeft || '';
+    } catch (e) {
+      paddingValue = '';
+    }
+  }
+
+  const parsed = parseFloat(paddingValue);
+  if (Number.isFinite(parsed) && parsed > 0) {
+    return Math.max(0, Math.round(parsed / 12));
+  }
+
+  // Fallback: count nested lists
+  const listAncestors = Array.from(li.parentElement?.closest('ul, ol') ? li.parentElement.closest('ul, ol').querySelectorAll('ul, ol') : []);
+  if (listAncestors.length > 0) {
+    return listAncestors.length - 1;
+  }
+
+  return 0;
+}
+
+/**
+ * Assigns hierarchical numeric prefixes to pages based on their depth.
+ * Each page receives a `numberPrefix` string representing its position in a depth-aware counter (e.g. top-level "01", nested "01.2.3").
+ *
+ * @param {Array<Object>} pages - Array of page objects. Each page may include a numeric `depth` property; this function sets or replaces `page.numberPrefix`.
+ * @returns {Array<Object>} The same `pages` array with `numberPrefix` assigned to each page. Top-level prefixes are two-digit zero-padded.
+ */
+function applyNumberPrefixes(pages) {
+  const counts = [];
+
+  pages.forEach(page => {
+    const depth = Math.max(0, Number.isInteger(page.depth) ? page.depth : 0);
+
+    // Ensure counters length
+    while (counts.length <= depth) {
+      counts.push(0);
+    }
+
+    counts[depth] += 1;
+    counts.splice(depth + 1);
+
+    const top = String(counts[0]).padStart(2, '0');
+    if (depth === 0) {
+      page.numberPrefix = top;
+    } else {
+      const subParts = counts.slice(1).map(n => String(n));
+      page.numberPrefix = `${top}.${subParts.join('.')}`;
+    }
+  });
+
+  return pages;
+}
+
 // Listen for messages from popup
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === "convertToMarkdown") {
     try {
       // Get page title from head
       const headTitle = document.title || "";
-      // Format head title: replace slashes and pipes with dashes
       const formattedHeadTitle = headTitle.replace(/[\/|]/g, '-').replace(/\s+/g, '-').replace('---','-');
 
-      // Get article title (keep unchanged)
+      // --- ESTRATÉGIA DE SELEÇÃO DE TÍTULO ---
       const title =
-        document
-          .querySelector(
-            '.container > div:nth-child(1) a[data-selected="true"]'
-          )
-          ?.textContent?.trim() ||
-        document
-          .querySelector(".container > div:nth-child(1) h1")
-          ?.textContent?.trim() ||
+        document.querySelector('.container > div:nth-child(1) a[data-selected="true"]')?.textContent?.trim() ||
+        document.querySelector("main h1")?.textContent?.trim() ||
+        document.querySelector("article h1")?.textContent?.trim() ||
         document.querySelector("h1")?.textContent?.trim() ||
         "Untitled";
 
-      // Get article content container (keep unchanged)
-      const contentContainer =
-        document.querySelector(".container > div:nth-child(2) .prose") ||
-        document.querySelector(".container > div:nth-child(2) .prose-custom") ||
-        document.querySelector(".container > div:nth-child(2)") ||
-        document.body;
+      // --- ESTRATÉGIA DE SELEÇÃO DE CONTEÚDO (Ultra Robusta) ---
+      // Prioriza containers semânticos ou específicos de documentação
+      const contentContainer = selectContentContainer();
+      if (!contentContainer) {
+        throw new Error('Unable to locate main content for conversion. Please make sure the page has loaded.');
+      }
 
       let markdown = ``;
       let markdownTitle = title.replace(/\s+/g, '-');
@@ -36,6 +194,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
       // Normalize blank lines
       markdown = markdown.trim().replace(/\n{3,}/g, "\n\n");
+
+      // --- INTEGRAÇÃO: DEEPWIKI LINK FIX ---
+      console.log("Applying DeepWiki Fixes...");
+      markdown = DeepWikiFixer.process(markdown);
+      // -------------------------------------
+
       sendResponse({ 
         success: true, 
         markdown, 
@@ -47,39 +211,338 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       sendResponse({ success: false, error: error.message });
     }
   } else if (request.action === "extractAllPages") {
-    try {
-      // Get the head title
+    (async () => {
+      try {
       const headTitle = document.title || "";
-      // Format head title: replace slashes and pipes with dashes
       const formattedHeadTitle = headTitle.replace(/[\/|]/g, '-').replace(/\s+/g, '-').replace('---','-');
-      
-      // Get the base part of the current document path
-      const baseUrl = window.location.origin;
-      
-      // Get all links in the sidebar
-      const sidebarLinks = Array.from(document.querySelectorAll('.border-r-border ul li a'));
-      
-      // Extract link URLs and titles
-      const pages = sidebarLinks.map(link => {
-        return {
-          url: new URL(link.getAttribute('href'), baseUrl).href,
-          title: link.textContent.trim(),
-          selected: link.getAttribute('data-selected') === 'true'
-        };
+      const baseUrl = window.location.href;
+      const baseOrigin = window.location.origin;
+      const currentPath = window.location.pathname || "/";
+      const hostname = window.location.hostname;
+
+      // Detect site type for appropriate prefix depth
+      const isDevinAi = hostname.includes('devin.ai');
+
+      // Deriva prefixos do "projeto atual" a partir da URL corrente
+      const pathSegments = currentPath.split("/").filter(Boolean);
+
+      // For Devin.ai: /wiki/{owner} is the project scope (owner level, not page level)
+      // For DeepWiki: /wiki/{owner}/{repo} is the project scope
+      const markerIdx = pathSegments.findIndex(seg => ['deepwiki', 'wiki', 'docs'].includes(seg.toLowerCase()));
+
+      let defaultPrefix = "/";
+      if (markerIdx >= 0) {
+        if (isDevinAi) {
+          // Devin.ai: /wiki/Owner is the project prefix
+          const segmentsAfterMarker = pathSegments.length - (markerIdx + 1);
+          if (segmentsAfterMarker >= 1) {
+            defaultPrefix = `/${pathSegments.slice(0, markerIdx + 2).join("/")}`;
+          } else {
+            defaultPrefix = `/${pathSegments.slice(0, markerIdx + 1).join("/")}`;
+          }
+        } else {
+          // DeepWiki: /wiki/Owner/Repo is the project prefix
+          const segmentsAfterMarker = pathSegments.length - (markerIdx + 1);
+          if (segmentsAfterMarker >= 2) {
+            defaultPrefix = `/${pathSegments.slice(0, markerIdx + 3).join("/")}`;
+          } else {
+            defaultPrefix = `/${pathSegments.slice(0, markerIdx + 2).join("/")}`;
+          }
+        }
+      } else if (pathSegments.length >= 2) {
+        defaultPrefix = `/${pathSegments.slice(0, 2).join("/")}`;
+      } else if (pathSegments.length === 1) {
+        defaultPrefix = `/${pathSegments[0]}`;
+      }
+
+      // Only generate prefix candidates at or shorter than the default prefix depth
+      const prefixCandidates = new Set();
+      const defaultDepth = defaultPrefix.split("/").filter(Boolean).length;
+      for (let len = 2; len <= defaultDepth; len++) {
+        if (len <= pathSegments.length) {
+          prefixCandidates.add(`/${pathSegments.slice(0, len).join("/")}`);
+        }
+      }
+      // Always include the computed default
+      prefixCandidates.add(defaultPrefix);
+
+      const prefixList = Array.from(prefixCandidates).sort((a, b) => b.length - a.length);
+
+      /**
+       * Resolve a possibly relative href against the module's baseUrl and return an absolute URL object.
+       * @param {string} href - The input URL or relative path to resolve.
+       * @returns {URL|null} The resolved URL object, or `null` if `href` is not a valid URL.
+       */
+      function resolveUrl(href) {
+        try {
+          return new URL(href, baseUrl);
+        } catch (e) {
+          return null;
+        }
+      }
+
+      // Use the computed default prefix directly - it already accounts for site-specific structure
+      const bestPrefix = defaultPrefix;
+
+      /**
+       * Determines whether the given URL's pathname begins with the current project prefix.
+       *
+       * If no project prefix is configured, this function treats every URL as a match.
+       *
+       * @param {object|null} urlObj - Object with a `pathname` string (for example a `URL` or location-like object). If falsy, the function returns `false`.
+       * @returns {boolean} `true` if the pathname starts with the configured project prefix or if no prefix is configured, `false` otherwise.
+       */
+      function matchesProjectPrefix(urlObj) {
+        if (!urlObj) return false;
+        if (!bestPrefix) return true;
+        return urlObj.pathname.startsWith(bestPrefix);
+      }
+
+      // --- ESTRATÉGIA DE SELEÇÃO DE BARRA LATERAL ---
+      let sidebarLinks = [];
+      const currentPathNormalized = currentPath.replace(/\/$/, '');
+
+      // For Devin.ai: Prefer sidebar buttons (no hrefs), fallback to numeric hash links
+      if (isDevinAi) {
+        const devinButtons = findDevinTopicButtons();
+        if (devinButtons.length > 0) {
+          console.log('[Batch Debug] Devin.ai mode: Found topic buttons:', devinButtons.length);
+          const pages = devinButtons.map((btn, index) => {
+            const title = getElementTitle(btn) || `Topic ${index + 1}`;
+            const selected =
+              btn.getAttribute('aria-current') === 'true' ||
+              btn.getAttribute('aria-selected') === 'true' ||
+              btn.classList.contains('selected') ||
+              btn.classList.contains('active');
+            return {
+              url: baseUrl,
+              title,
+              selected,
+              devinIndex: index,
+              depth: getListItemDepth(btn)
+            };
+          });
+
+          applyNumberPrefixes(pages);
+
+          const currentPageTitle =
+            document.querySelector("main h1")?.textContent?.trim() ||
+            document.querySelector("h1")?.textContent?.trim() ||
+            "Untitled";
+
+          sendResponse({
+            success: true,
+            pages,
+            currentTitle: currentPageTitle,
+            baseUrl: baseUrl,
+            headTitle: formattedHeadTitle
+          });
+          return;
+        }
+
+        console.log('[Batch Debug] Devin.ai mode: Searching for numeric hash topic links...');
+
+        // Find ALL links in the document
+        const allLinks = Array.from(document.querySelectorAll('a[href]'));
+
+        // Filter to only topic links (numeric hash patterns like #2, #3, #3.1)
+        const topicLinks = allLinks.filter(link => {
+          const href = link.getAttribute('href');
+          if (!href) return false;
+
+          // Direct hash links like #2, #3, #3.1, #7, etc. (numeric, optionally with dots)
+          if (href.match(/^#\d[\d.]*$/)) return true;
+
+          // Full URL links to current page
+          const urlObj = resolveUrl(href);
+          if (!urlObj) return false;
+          const linkPathNormalized = urlObj.pathname.replace(/\/$/, '');
+
+          if (linkPathNormalized === currentPathNormalized) {
+            // Include base URL (first topic) or links with numeric hashes
+            if (!urlObj.hash) return true; // Base URL = first topic
+            return urlObj.hash.match(/^#\d[\d.]*$/); // Numeric hash
+          }
+          return false;
+        });
+
+        console.log('[Batch Debug] Found topic links:', topicLinks.length);
+        if (topicLinks.length > 0) {
+          console.log('[Batch Debug] Sample links:', topicLinks.slice(0, 10).map(l => l.getAttribute('href')));
+        }
+
+        sidebarLinks = topicLinks;
+      } else {
+        // DeepWiki: Use nav container selection
+        const navContainers = Array.from(
+          document.querySelectorAll('nav, aside, .sidebar, [class*="sidebar"], [class*="Sidebar"], [class*="menu"], [class*="drawer"]')
+        );
+
+        // Log prefix info for debugging
+        if (navContainers.length > 0) {
+          const allLinkPaths = navContainers
+            .flatMap(nav => Array.from(nav.querySelectorAll("a")))
+            .map(link => resolveUrl(link.getAttribute("href")))
+            .filter(urlObj => urlObj && urlObj.origin === baseOrigin)
+            .map(urlObj => urlObj.pathname);
+
+          const matchCount = allLinkPaths.filter(path => path.startsWith(bestPrefix)).length;
+
+          console.log("DeepWiki Batch Debug:", {
+            totalLinksScanned: allLinkPaths.length,
+            siteType: 'deepwiki',
+            chosenPrefix: bestPrefix,
+            matchCount: matchCount,
+            currentPath
+          });
+        } else {
+          console.log("DeepWiki Batch Debug: No nav containers found.");
+        }
+
+        if (navContainers.length > 0) {
+          let expandedCount = 0;
+          navContainers.forEach(nav => {
+            expandedCount += expandAllNavSections(nav);
+          });
+          if (expandedCount > 0) {
+            await new Promise(resolve => setTimeout(resolve, 250));
+          }
+
+          const navCandidates = [];
+          navContainers.forEach(nav => {
+            const links = Array.from(nav.querySelectorAll("a"));
+            if (links.length === 0) return;
+
+            let sameOriginCount = 0;
+            let projectMatchCount = 0;
+
+            links.forEach(link => {
+              const href = link.getAttribute("href");
+              if (!href) return;
+              const urlObj = resolveUrl(href);
+              if (!urlObj || urlObj.origin !== baseOrigin) return;
+              sameOriginCount += 1;
+              if (matchesProjectPrefix(urlObj)) {
+                projectMatchCount += 1;
+              }
+            });
+
+            const ratio = sameOriginCount > 0 ? projectMatchCount / sameOriginCount : 0;
+            const score = projectMatchCount * 10 + ratio;
+            navCandidates.push({ nav, links, sameOriginCount, projectMatchCount, score });
+          });
+
+          if (navCandidates.length > 0) {
+            const sorted = navCandidates.slice().sort((a, b) => b.score - a.score);
+            const best = sorted[0];
+            const minProjectMatches = Math.max(2, Math.floor(best.projectMatchCount * 0.6));
+            let chosen = navCandidates.filter(candidate => candidate.projectMatchCount >= minProjectMatches);
+            if (!chosen.length) {
+              chosen = [best];
+            }
+
+            console.log('[Batch Debug] Selected Navs:', {
+              expandedCount,
+              bestScore: best.score,
+              minProjectMatches,
+              chosenCount: chosen.length
+            });
+
+            sidebarLinks = chosen.flatMap(candidate => candidate.links);
+          }
+        }
+
+        // Fallback específico para DeepWiki original (listas aninhadas)
+        if (sidebarLinks.length === 0) {
+          console.log('[Batch Debug] Fallback: Trying specific selectors...');
+          const nodes = document.querySelectorAll('.border-r-border ul li a, [class*="border-r"] ul li a');
+          sidebarLinks = Array.from(nodes);
+        }
+      }
+
+      console.log('[Batch Debug] Raw Sidebar Links:', sidebarLinks.length);
+
+      // Filtragem e Limpeza dos Links
+      const validLinks = sidebarLinks.filter(link => {
+         const href = link.getAttribute('href');
+         if (!href || href.startsWith('mailto') || href.startsWith('javascript')) return false;
+
+         const urlObj = resolveUrl(href);
+         if (!urlObj || urlObj.origin !== baseOrigin) return false;
+
+         if (isDevinAi) {
+           // Already filtered during hash link search
+           const linkPathNormalized = urlObj.pathname.replace(/\/$/, '');
+           if (linkPathNormalized !== currentPathNormalized) return false;
+         } else {
+           if (!matchesProjectPrefix(urlObj)) return false;
+         }
+
+         const fallbackTitle = urlObj.hash ? `Topic-${urlObj.hash.replace('#', '')}` : '';
+         const title = getElementTitle(link) || fallbackTitle;
+         const text = title.toLowerCase();
+         if (['logout', 'sign out', 'settings', 'profile', 'home'].includes(text)) return false;
+         if (text.length === 0) return false;
+
+         return true;
+      });
+
+      console.log('[Batch Debug] Valid Links after filtering:', validLinks.length);
+      if (validLinks.length > 0) {
+        console.log('[Batch Debug] Sample valid links:', validLinks.slice(0, 5).map(l => l.getAttribute('href')));
+      }
+
+      // Remove duplicatas baseadas na URL
+      const uniquePagesMap = new Map();
+      validLinks.forEach(link => {
+        const urlObj = resolveUrl(link.getAttribute('href'));
+        if (!urlObj) return;
+        const fullUrl = urlObj.href; // Includes Hash
+        const key = normalizeUrlKey(urlObj);
+        if (!uniquePagesMap.has(key)) {
+            const fallbackTitle = urlObj.hash ? `Topic-${urlObj.hash.replace('#', '')}` : '';
+            const linkTitle = getElementTitle(link) || fallbackTitle || "Untitled Page";
+            uniquePagesMap.set(key, {
+                url: fullUrl,
+                title: linkTitle,
+                selected: link.getAttribute('data-selected') === 'true' || link.classList.contains('active') || link.classList.contains('selected'),
+                depth: getListItemDepth(link)
+            });
+        }
       });
       
-      // Get current page information for return
+      console.log('[Batch Debug] Unique Hashes/Pages:', uniquePagesMap.size);
+
+      let pages = Array.from(uniquePagesMap.values());
+
+      applyNumberPrefixes(pages);
+      
       const currentPageTitle =
-        document
-          .querySelector(
-            '.container > div:nth-child(1) a[data-selected="true"]'
-          )
-          ?.textContent?.trim() ||
-        document
-          .querySelector(".container > div:nth-child(1) h1")
-          ?.textContent?.trim() ||
-        document.querySelector("h1")?.textContent?.trim() ||
+        document.querySelector("main h1")?.textContent?.trim() ||
+        document.querySelector("h1")?.textContent?.trim() || 
         "Untitled";
+
+      try {
+        const currentUrlObj = new URL(baseUrl);
+        const currentKey = normalizeUrlKey(currentUrlObj);
+        const hasCurrent = pages.some(page => {
+          try {
+            return normalizeUrlKey(new URL(page.url)) === currentKey;
+          } catch (e) {
+            return false;
+          }
+        });
+        if (!hasCurrent) {
+          pages = [{
+            url: currentUrlObj.href,
+            title: currentPageTitle || "Untitled",
+            selected: true
+          }, ...pages];
+          console.log('[Batch Debug] Added current page explicitly:', currentUrlObj.href);
+        }
+      } catch (e) {
+        console.warn('[Batch Debug] Failed to add current page explicitly:', e.message);
+      }
         
       sendResponse({ 
         success: true, 
@@ -88,30 +551,731 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         baseUrl: baseUrl,
         headTitle: formattedHeadTitle
       });
+      } catch (error) {
+        console.error("Error extracting page links:", error);
+        sendResponse({ success: false, error: error.message });
+      }
+    })();
+    return true;
+  } else if (request.action === "selectDevinTopic") {
+    (async () => {
+      try {
+        const buttons = findDevinTopicButtons();
+        if (!buttons.length) {
+          throw new Error('No Devin topic buttons found.');
+        }
+
+        const index = Number.isInteger(request.index) ? request.index : -1;
+        const targetTitle = typeof request.title === 'string' ? request.title.trim() : '';
+
+        let targetButton = null;
+        if (targetTitle) {
+          targetButton = buttons.find(btn => getElementTitle(btn) === targetTitle);
+          if (!targetButton) {
+            targetButton = buttons.find(btn => getElementTitle(btn).includes(targetTitle));
+          }
+        }
+        if (!targetButton && index >= 0 && index < buttons.length) {
+          targetButton = buttons[index];
+        }
+        if (!targetButton) {
+          throw new Error('Unable to resolve Devin topic button.');
+        }
+
+        const expectedTitle = getElementTitle(targetButton);
+        const startHash = window.location.hash;
+
+        if (typeof targetButton.scrollIntoView === 'function') {
+          targetButton.scrollIntoView({ block: 'center' });
+        }
+        if (typeof targetButton.click === 'function') {
+          targetButton.click();
+        }
+
+        const deadline = Date.now() + 2500;
+        while (Date.now() < deadline) {
+          if (window.location.hash && window.location.hash !== startHash) {
+            break;
+          }
+          if (expectedTitle) {
+            const headings = Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, h6'));
+            const matches = headings.some(h => (h.textContent || '').trim() === expectedTitle);
+            if (matches) {
+              break;
+            }
+          }
+          if (
+            targetButton.getAttribute('aria-selected') === 'true' ||
+            targetButton.getAttribute('aria-current') === 'true' ||
+            targetButton.classList.contains('active') ||
+            targetButton.classList.contains('selected')
+          ) {
+            break;
+          }
+          await new Promise(resolve => setTimeout(resolve, 120));
+        }
+
+        sendResponse({
+          success: true,
+          selectedIndex: buttons.indexOf(targetButton),
+          selectedTitle: expectedTitle
+        });
+      } catch (error) {
+        console.error('Error selecting Devin topic:', error);
+        sendResponse({ success: false, error: error.message });
+      }
+    })();
+    return true;
+  } else if (request.action === "getContentSignature") {
+    try {
+      const signature = getContentSignature();
+      const metrics = getContentReadinessMetrics();
+      sendResponse({ success: true, signature, metrics, currentUrl: window.location.href });
     } catch (error) {
-      console.error("Error extracting page links:", error);
+      console.error('Error getting content signature:', error);
       sendResponse({ success: false, error: error.message });
     }
+    return true;
+  } else if (request.action === "waitForTopicReady") {
+    waitForTopicReady(request)
+      .then(response => sendResponse(response))
+      .catch(error => {
+        console.error('waitForTopicReady error:', error);
+        sendResponse({ ready: false, error: error.message });
+      });
+    return true;
+  } else if (request.action === "waitForContentReady") {
+    waitForContentReady(request)
+      .then(response => sendResponse(response))
+      .catch(error => {
+        console.error("waitForContentReady error:", error);
+        sendResponse({ ready: false, error: error.message });
+      });
+    return true;
   } else if (request.action === "pageLoaded") {
-    // Page loading complete, batch operation preparation can be handled here
-    // No sendResponse needed, as this is a notification from background.js
     console.log("Page loaded:", window.location.href);
-    // Always send a response, even if empty, to avoid connection errors
     sendResponse({ received: true });
   } else if (request.action === "tabActivated") {
-    // Tab has been activated, possibly after being in bfcache
     console.log("Tab activated:", window.location.href);
-    // Acknowledge receipt of message to avoid connection errors
     sendResponse({ received: true });
   }
-  // Always return true for asynchronous sendResponse handling
   return true;
 });
-// Function for Flowchart (ensure this exists from previous responses)
+
+/**
+ * Selects the primary content container element using a set of common site selectors.
+ * @returns {Element|null} The first matching content container element, or `null` if none is found.
+ */
+function selectContentContainer() {
+  return (
+    document.querySelector(".container > div:nth-child(2) .prose") ||
+    document.querySelector(".container > div:nth-child(2) .prose-custom") ||
+    document.querySelector(".container > div:nth-child(2)") || // DeepWiki fallback
+    document.querySelector("main .prose") ||
+    document.querySelector("article .prose") ||
+    document.querySelector(".prose") || // Tailwind typography standard
+    document.querySelector(".markdown-body") || // GitHub style
+    document.querySelector(".wiki-content")   // Common wiki class
+  );
+}
+
+/**
+ * Checks whether the current page's URL roughly matches an expected URL.
+ *
+ * Compares origins and requires the current pathname to start with the expected pathname;
+ * query string and hash are ignored. If `expectedUrl` is falsy or cannot be parsed, the function
+ * treats it as a match.
+ *
+ * @param {string|undefined|null} expectedUrl - The expected URL to match against; may be a full URL or falsy.
+ * @returns {boolean} `true` if the current location is considered a match for `expectedUrl`, `false` otherwise.
+ */
+function urlsRoughlyMatch(expectedUrl) {
+  if (!expectedUrl) return true;
+  try {
+    const expected = new URL(expectedUrl);
+    const current = new URL(window.location.href);
+    if (expected.origin !== current.origin) return false;
+    // Ignora search/hash e permite subpaths quando a navegação for SPA
+    return current.pathname.startsWith(expected.pathname);
+  } catch (e) {
+    return true;
+  }
+}
+
+/**
+ * Assess the page's main content readiness by locating a content container, measuring its visible text length, counting meaningful content blocks, and detecting Mermaid diagrams.
+ * @returns {{hasContainer: boolean, textLength: number, meaningfulCount: number, hasMermaid: boolean}} An object with:
+ *  - hasContainer: `true` if a content container was found, `false` otherwise.
+ *  - textLength: the length (number of characters) of visible text within the chosen container, excluding navigational and script/style content.
+ *  - meaningfulCount: the number of non-navigational block/content elements (paragraphs, code/pre blocks, tables, lists, headings, or mermaid SVGs) detected.
+ *  - hasMermaid: `true` if Mermaid-related elements are present inside the chosen container, `false` otherwise.
+ */
+function getContentReadinessMetrics() {
+  const container = selectContentContainer();
+  if (!container) {
+    return {
+      hasContainer: false,
+      textLength: 0,
+      meaningfulCount: 0,
+      hasMermaid: false
+    };
+  }
+
+  // Helper to check if node is inside a navigation-like element
+  const isNavigational = (node) => {
+    return node.closest('nav, aside, header, footer, .sidebar, .menu, [class*="sidebar"], [class*="nav-"]');
+  };
+
+  // Calculate text length excluding navigation
+  let textLength = 0;
+  if (container === document.body) {
+    // If we fell back to body, we must be very careful to ignore sidebars
+    const walker = document.createTreeWalker(
+      container,
+      NodeFilter.SHOW_TEXT,
+      {
+        acceptNode: (node) => {
+          if (isNavigational(node.parentElement)) return NodeFilter.FILTER_REJECT;
+           // Ignore script/style tags content which might be huge
+          if (['SCRIPT', 'STYLE', 'NOSCRIPT'].includes(node.parentElement.tagName)) return NodeFilter.FILTER_REJECT;
+          return NodeFilter.FILTER_ACCEPT;
+        }
+      }
+    );
+    while (walker.nextNode()) {
+      textLength += walker.currentNode.textContent.trim().length;
+    }
+  } else {
+    // If we have a specific container, mostly trust it, but safeguard against sidebar inclusion
+    // (e.g. if the container WRAPS the sidebar)
+    textLength = (container.textContent || "").trim().length; 
+    // If the container itself IS the sidebar or contains it significantly, this might still be wrong, 
+    // but usually specific containers are the article content. 
+    // Let's apply a lighter filter just in case.
+    if (container.querySelector('nav, aside, .sidebar')) {
+       // Recalculate carefully if potential sidebar detected inside
+       textLength = 0;
+       const walker = document.createTreeWalker(
+        container,
+        NodeFilter.SHOW_TEXT,
+        {
+          acceptNode: (node) => {
+            if (isNavigational(node.parentElement)) return NodeFilter.FILTER_REJECT;
+            if (['SCRIPT', 'STYLE', 'NOSCRIPT'].includes(node.parentElement.tagName)) return NodeFilter.FILTER_REJECT;
+            return NodeFilter.FILTER_ACCEPT;
+          }
+        }
+      );
+      while (walker.nextNode()) {
+        textLength += walker.currentNode.textContent.trim().length;
+      }
+    }
+  }
+
+  // Filter meaningful elements
+  const allElements = container.querySelectorAll(
+    "p, pre, code, table, ul, ol, h1, h2, h3, h4, h5, h6, svg[id^='mermaid-']"
+  );
+  
+  let meaningfulCount = 0;
+  allElements.forEach(el => {
+    if (!isNavigational(el)) {
+      meaningfulCount++;
+    }
+  });
+
+  const hasMermaid = Boolean(Array.from(container.querySelectorAll("svg[id^='mermaid-'], pre code.language-mermaid"))
+    .some(el => !isNavigational(el)));
+
+  return {
+    hasContainer: true,
+    textLength,
+    meaningfulCount,
+    hasMermaid
+  };
+}
+
+/**
+ * Create a compact signature of the page's primary content for quick comparison or display.
+ *
+ * If no content container is found, returns empty heading/snippet and a textLength of 0 (hash is still provided).
+ *
+ * @returns {{heading: string, snippet: string, textLength: number, hash: string}} An object containing:
+ *  - heading: trimmed text of the first heading element (h1, h2, or h3) within the content container, or `''` if none.
+ *  - snippet: the first 240 characters of container text with normalized whitespace.
+ *  - textLength: total length of the container's normalized text.
+ *  - hash: the current window.location.hash or `''` if none.
+ */
+function getContentSignature() {
+  const container = selectContentContainer();
+  if (!container) {
+    return {
+      heading: '',
+      snippet: '',
+      textLength: 0,
+      hash: window.location.hash || ''
+    };
+  }
+
+  const heading = container.querySelector('h1, h2, h3')?.textContent?.trim() || '';
+  const rawText = (container.textContent || '').replace(/\s+/g, ' ').trim();
+  const snippet = rawText.slice(0, 240);
+
+  return {
+    heading,
+    snippet,
+    textLength: rawText.length,
+    hash: window.location.hash || ''
+  };
+}
+
+/**
+ * Waits for the page content to meet basic readiness criteria or for a timeout.
+ *
+ * @param {Object} [options] - Optional configuration.
+ * @param {number} [options.timeoutMs=20000] - Maximum wait time in milliseconds.
+ * @param {number} [options.intervalMs=250] - Polling interval in milliseconds.
+ * @param {number} [options.minTextLength=160] - Minimum text length considered "ready".
+ * @param {string} [options.expectedUrl=""] - Expected URL prefix used for rough URL matching.
+ * @returns {Object} An object describing readiness:
+ *  - ready: `true` if the content met readiness criteria, `false` otherwise.
+ *  - timedOut: `true` if the wait ended due to timeout without meeting criteria.
+ *  - urlOk: `true` if the current URL roughly matches `expectedUrl`.
+ *  - metrics: the object returned by `getContentReadinessMetrics()`.
+ *  - currentUrl: the current page URL.
+ *  - expectedUrl: the `expectedUrl` passed in options.
+ */
+async function waitForContentReady(options = {}) {
+  const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 20000;
+  const intervalMs = Number(options.intervalMs) > 0 ? Number(options.intervalMs) : 250;
+  const minTextLength = Number(options.minTextLength) > 0 ? Number(options.minTextLength) : 160;
+  const expectedUrl = options.expectedUrl || "";
+
+  const start = Date.now();
+  const deadline = start + timeoutMs;
+
+  return new Promise(resolve => {
+    const tick = () => {
+      const urlOk = urlsRoughlyMatch(expectedUrl);
+      const metrics = getContentReadinessMetrics();
+      const ready =
+        urlOk &&
+        metrics.hasContainer &&
+        (metrics.textLength >= minTextLength ||
+          metrics.meaningfulCount >= 6 ||
+          metrics.hasMermaid);
+
+      if (ready || Date.now() >= deadline) {
+        const timedOut = !ready;
+        console.log("Content readiness check:", {
+          ready,
+          timedOut,
+          urlOk,
+          expectedUrl,
+          currentUrl: window.location.href,
+          metrics
+        });
+        resolve({
+          ready,
+          timedOut,
+          urlOk,
+          metrics,
+          currentUrl: window.location.href,
+          expectedUrl
+        });
+        return;
+      }
+
+      setTimeout(tick, intervalMs);
+    };
+
+    tick();
+  });
+}
+
+/**
+ * Waits until a topic's content appears to be updated and substantial, or until a timeout elapses.
+ *
+ * @param {Object} [options] - Configuration for the readiness check.
+ * @param {number} [options.timeoutMs=8000] - Maximum time to wait in milliseconds.
+ * @param {number} [options.intervalMs=200] - Polling interval in milliseconds.
+ * @param {number} [options.minTextLength=160] - Minimum text length considered "substantial".
+ * @param {string} [options.expectedTitle] - Optional expected heading/title to match.
+ * @param {Object} [options.previousSignature] - Optional previous content signature to detect changes (should contain `snippet` and `textLength`).
+ * @returns {Object} An object with readiness results:
+ *   - ready {boolean} — `true` if content is considered ready, `false` otherwise.
+ *   - timedOut {boolean} — `true` if the wait ended due to timeout without readiness.
+ *   - metrics {Object} — metrics from getContentReadinessMetrics().
+ *   - signature {Object} — current content signature from getContentSignature().
+ *   - expectedTitle {string} — the provided expectedTitle (possibly empty).
+ *   - currentUrl {string} — the current page URL.
+ */
+async function waitForTopicReady(options = {}) {
+  const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 8000;
+  const intervalMs = Number(options.intervalMs) > 0 ? Number(options.intervalMs) : 200;
+  const minTextLength = Number(options.minTextLength) > 0 ? Number(options.minTextLength) : 160;
+  const expectedTitle = (options.expectedTitle || '').trim();
+  const previousSignature = options.previousSignature || null;
+
+  const start = Date.now();
+  const deadline = start + timeoutMs;
+
+  const normalizedExpected = expectedTitle.toLowerCase();
+
+  return new Promise(resolve => {
+    const tick = () => {
+      const metrics = getContentReadinessMetrics();
+      const signature = getContentSignature();
+
+      const headingNormalized = (signature.heading || '').toLowerCase();
+      const titleMatched = normalizedExpected &&
+        (headingNormalized === normalizedExpected || headingNormalized.includes(normalizedExpected));
+
+      const previousSnippet = previousSignature?.snippet || '';
+      const previousLength = previousSignature?.textLength || 0;
+      const snippetChanged = Boolean(signature.snippet && signature.snippet !== previousSnippet);
+      const lengthChanged = Math.abs(signature.textLength - previousLength) > 40;
+
+      const contentLooksSubstantial =
+        metrics.textLength >= minTextLength ||
+        metrics.meaningfulCount >= 6 ||
+        metrics.hasMermaid;
+
+      const ready =
+        metrics.hasContainer &&
+        (titleMatched || snippetChanged || lengthChanged) &&
+        (contentLooksSubstantial || metrics.meaningfulCount >= 3);
+
+      if (ready || Date.now() >= deadline) {
+        resolve({
+          ready,
+          timedOut: !ready,
+          metrics,
+          signature,
+          expectedTitle,
+          currentUrl: window.location.href
+        });
+        return;
+      }
+
+      setTimeout(tick, intervalMs);
+    };
+
+    tick();
+  });
+}
+
+// ==========================================
+//  CLASSE DE INTEGRAÇÃO DO FIX_DOCS (PORT)
+// ==========================================
+
+const DeepWikiFixer = {
+  process(text) {
+    if (!text) return "";
+    text = this.stripPreamble(text);
+    text = this.removeLinkCopied(text);
+    text = this.removeAskDevinLines(text);
+    text = this.fixInternalLinks(text);
+    text = this.fixSectionLinks(text);
+    text = this.stripGithubBlobSha(text);
+    text = this.sanitizeMermaid(text);
+    return text;
+  },
+
+  SECTION_ANCHORS: {
+    "Networking Section": "networking-configuration",
+    "Virtual Environment Section": "virtual-environment-setup",
+    "Module Import Section": "module-import-issues",
+    "WSL.exe Section": "wslexe-issues",
+    "Path Translation Section": "path-translation-issues",
+    "Performance Section": "performance-optimization",
+    "Line Ending Section": "line-ending-issues",
+    "Distribution Section": "distribution-selection",
+  },
+
+  BRANCH_LABELS: new Set(["yes", "no", "true", "false"]),
+  
+  POSITIVE_HINTS: [
+    "add", "use", "enable", "create", "remove", "success", "ready", 
+    "connected", "established", "proceed", "continue"
+  ],
+  
+  NEGATIVE_HINTS: [
+    "fail", "error", "invalid", "reject", "timeout", "blocked", 
+    "missing", "not", "false", "empty", "return", "skip", "default"
+  ],
+
+  stripPreamble(text) {
+    const lines = text.split('\n');
+    let firstHeaderIdx = -1;
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].trimStart().startsWith('#')) {
+        firstHeaderIdx = i;
+        break;
+      }
+    }
+    if (firstHeaderIdx === -1 || firstHeaderIdx === 0) return text;
+    let remaining = lines.slice(firstHeaderIdx).join('\n');
+    if (text.endsWith('\n')) remaining += '\n';
+    return remaining;
+  },
+
+  removeLinkCopied(text) {
+    return text.replace(/\s*Link copied!/g, "");
+  },
+
+  removeAskDevinLines(text) {
+    const lines = text.split('\n');
+    const filtered = lines.filter(line => !line.trim().startsWith("Ask Devin about"));
+    let result = filtered.join('\n');
+    if (text.endsWith('\n')) result += '\n';
+    return result;
+  },
+
+  fixInternalLinks(text) {
+    text = text.replace(/\]\((?!\s*http)(\/[^)\s]+)\)/g, (match, p1) => {
+        return `](https://github.com${p1})`;
+    });
+    text = text.replace(/(^\s*\[[^\]]+\]:\s*)(\/[^)\s]+)/gm, (match, p1, p2) => {
+        return `${p1}https://github.com${p2}`;
+    });
+    return text;
+  },
+
+  fixSectionLinks(text) {
+    for (const [section, anchor] of Object.entries(this.SECTION_ANCHORS)) {
+        const escapedSection = section.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const pattern = new RegExp(`https://github\\.com/(?<owner>[^/]+)/(?<repo>[^/]+)/blob/(?<sha>[0-9a-f]{7,40})/${escapedSection}`, 'g');
+        
+        text = text.replace(pattern, (...args) => {
+            const groups = args.pop(); 
+            return `https://github.com/${groups.owner}/${groups.repo}/blob/${groups.sha}/README.md#${anchor}`;
+        });
+    }
+    return text;
+  },
+
+  stripGithubBlobSha(text) {
+    return text.replace(/https:\/\/github\.com\/([^/]+)\/([^/]+)\/blob\/([0-9a-f]{7,40})\//g, 
+        "https://github.com/$1/$2/");
+  },
+
+  sanitizeMermaid(text) {
+    const lines = text.split('\n');
+    const out = [];
+    let inBlock = false;
+    let blockLines = [];
+
+    for (const line of lines) {
+      if (line.trim().startsWith("```") && line.toLowerCase().includes("mermaid")) {
+        inBlock = true;
+        out.push(line);
+        blockLines = [];
+        continue;
+      }
+      if (inBlock) {
+        if (line.trim().startsWith("```")) {
+          out.push(...this.sanitizeMermaidBlock(blockLines));
+          out.push(line);
+          inBlock = false;
+        } else {
+          blockLines.push(line);
+        }
+        continue;
+      }
+      out.push(line);
+    }
+
+    if (inBlock) {
+      out.push(...this.sanitizeMermaidBlock(blockLines));
+    }
+
+    let result = out.join('\n');
+    if (text.endsWith('\n')) result += '\n';
+    return result;
+  },
+
+  sanitizeMermaidBlock(lines) {
+    lines = this.sanitizeNodeLabels(lines);
+    let blockType = null;
+    for (const line of lines) {
+      const stripped = line.trim();
+      if (!stripped) continue;
+      if (stripped.startsWith("flowchart") || stripped.startsWith("graph")) {
+        blockType = "flowchart";
+      }
+      break;
+    }
+    if (blockType === "flowchart") {
+      return this.moveBranchLabels(lines);
+    }
+    return lines;
+  },
+
+  sanitizeNodeLabels(lines) {
+    const nodeLabelRe = /\["(.*?)"\]/g;
+    return lines.map(line => {
+      return line.replace(nodeLabelRe, (match, label) => {
+        return `["${this.sanitizeLabel(label)}"]`;
+      });
+    });
+  },
+
+  sanitizeLabel(label) {
+    if (this.containsListMarker(label)) {
+      return "Unsupported markdown: list";
+    }
+    label = label.replace(/\[[^\]]+\]\([^)]+\)/g, "Unsupported markdown: link");
+    label = label.replace(/https?:\/\/\S+/g, "Unsupported markdown: link");
+    return label;
+  },
+
+  containsListMarker(label) {
+    const listItemRe = /^\s*(?:\d+\.\s+|[-*+]\s+)/;
+    const parts = label.split(/<br\s*\/?>/i);
+    return parts.some(part => listItemRe.test(part.trim()));
+  },
+
+  moveBranchLabels(lines) {
+    const edgeRe = /^(?<indent>\s*)(?<src>[A-Za-z0-9_]+)\s*(?<arrow>[-.=]+>)\s*(?:\|"(?<label>[^"]*)"\|\s*)?(?<dst>[A-Za-z0-9_]+)\s*$/;
+    const nodeLabelRe = /\["(.*?)"\]/;
+
+    const edges = [];
+    const nodeLabels = {};
+
+    lines.forEach((line, idx) => {
+      const labelMatch = line.match(nodeLabelRe);
+      if (labelMatch) {
+        const prefix = line.split('["')[0].trim();
+        if (prefix) {
+          nodeLabels[prefix] = labelMatch[1];
+        }
+      }
+
+      const match = line.match(edgeRe);
+      if (match && match.groups) {
+        edges.push({
+          lineIdx: idx,
+          indent: match.groups.indent,
+          src: match.groups.src,
+          arrow: match.groups.arrow,
+          label: match.groups.label || null,
+          dst: match.groups.dst
+        });
+      }
+    });
+
+    const outgoing = {};
+    edges.forEach((edge, idx) => {
+      if (!outgoing[edge.src]) outgoing[edge.src] = [];
+      outgoing[edge.src].push(idx);
+    });
+
+    const movedTargets = new Set();
+    const labelMoves = [];
+
+    edges.forEach((edge, edgeIdx) => {
+      if (movedTargets.has(edgeIdx)) return;
+      if (!this.isBranchLabel(edge.label)) return;
+      if ((outgoing[edge.src] || []).length !== 1) return;
+
+      const candidatesAll = outgoing[edge.dst] || [];
+      if (candidatesAll.length < 2) return;
+
+      const candidates = candidatesAll.filter(idx => edges[idx].label === null);
+      if (candidates.length === 0) return;
+
+      const polarity = this.labelPolarity(edge.label);
+      const targetIdx = this.chooseEdge(edges, nodeLabels, candidates, polarity);
+
+      if (targetIdx !== null) {
+        labelMoves.push({ from: edgeIdx, to: targetIdx });
+        movedTargets.add(targetIdx);
+      }
+    });
+
+    labelMoves.forEach(move => {
+      edges[move.to].label = edges[move.from].label;
+      edges[move.from].label = null;
+    });
+
+    edges.forEach(edge => {
+      if (edge.label) {
+        lines[edge.lineIdx] = `${edge.indent}${edge.src} ${edge.arrow}|"${edge.label}"| ${edge.dst}`;
+      } else {
+        lines[edge.lineIdx] = `${edge.indent}${edge.src} ${edge.arrow} ${edge.dst}`;
+      }
+    });
+
+    return lines;
+  },
+
+  isBranchLabel(label) {
+    if (!label) return false;
+    return this.BRANCH_LABELS.has(label.trim().toLowerCase());
+  },
+
+  labelPolarity(label) {
+    if (!label) return null;
+    const lowered = label.trim().toLowerCase();
+    if (lowered === "yes" || lowered === "true") return "positive";
+    if (lowered === "no" || lowered === "false") return "negative";
+    return null;
+  },
+
+  edgeScore(text, polarity) {
+    if (!polarity) return 0;
+    const textLower = text.toLowerCase();
+    
+    let posHits = 0;
+    this.POSITIVE_HINTS.forEach(hint => { if(textLower.includes(hint)) posHits++; });
+    
+    let negHits = 0;
+    this.NEGATIVE_HINTS.forEach(hint => { if(textLower.includes(hint)) negHits++; });
+
+    if (polarity === "positive") return posHits - negHits;
+    return negHits - posHits;
+  },
+
+  chooseEdge(edges, nodeLabels, candidates, polarity) {
+    if (!candidates || candidates.length === 0) return null;
+    if (candidates.length === 1) return candidates[0];
+
+    if (!polarity) {
+      const unlabeled = candidates.filter(idx => edges[idx].label === null);
+      return unlabeled.length === 1 ? unlabeled[0] : null;
+    }
+
+    const scored = candidates.map(idx => {
+      const dstNode = edges[idx].dst;
+      const targetLabel = nodeLabels[dstNode] || dstNode;
+      return {
+        score: this.edgeScore(targetLabel, polarity),
+        idx: idx
+      };
+    });
+
+    const maxScore = Math.max(...scored.map(s => s.score));
+    if (maxScore <= 0) {
+      const unlabeled = candidates.filter(idx => edges[idx].label === null);
+      return unlabeled.length === 1 ? unlabeled[0] : null;
+    }
+
+    const winners = scored.filter(s => s.score === maxScore);
+    return winners.length === 1 ? winners[0].idx : null;
+  }
+};
+
+/**
+ * Convert an SVG flowchart into Mermaid flowchart syntax.
+ *
+ * @param {SVGElement|null} svgElement - Root SVG element containing the flowchart; may be null.
+ * @returns {string|null} A fenced Mermaid code block representing the flowchart (including nodes, clusters/subgraphs, edges, labels, and arrow styles), or `null` if conversion is not possible.
+ */
 function convertFlowchartSvgToMermaidText(svgElement) {
   if (!svgElement) return null;
 
-    console.log("Starting flowchart conversion with hierarchical logic...");
+  console.log("Starting flowchart conversion with hierarchical logic...");
   let mermaidCode = "flowchart TD\n\n";
   const nodes = {}; 
   const clusters = {}; 
@@ -167,7 +1331,7 @@ function convertFlowchartSvgToMermaidText(svgElement) {
             title = labelEl.textContent.trim();
     }
     if (!title) {
-          title = svgId;
+            title = svgId;
         }
 
         const rect = clusterEl.querySelector('rect');
@@ -216,17 +1380,51 @@ function convertFlowchartSvgToMermaidText(svgElement) {
     const edges = [];
     const edgeLabels = {};
     svgElement.querySelectorAll('g.edgeLabel').forEach(labelEl => {
-        const text = labelEl.textContent?.trim();
-        const bbox = labelEl.getBoundingClientRect();
-        if(text) {
-             edgeLabels[labelEl.id] = {
-                text,
-                x: bbox.left + bbox.width / 2,
-                y: bbox.top + bbox.height / 2
-            };
+        const labelCarrier = labelEl.querySelector('[data-id]') || labelEl;
+        const labelId = labelCarrier.getAttribute('data-id') || labelEl.getAttribute('data-id') || labelEl.id;
+        if (!labelId) return;
+
+        const textEl = labelEl.querySelector('foreignObject p, foreignObject span, text');
+        const text = (textEl ? textEl.textContent : labelEl.textContent || '').trim();
+        if (!text) return;
+
+        let bbox = null;
+        try {
+            bbox = labelEl.getBBox();
+        } catch (e) {
+            // ignore
         }
+
+        const hasBbox = bbox && Number.isFinite(bbox.x) && Number.isFinite(bbox.y);
+        edgeLabels[labelId] = {
+            text,
+            center: hasBbox ? { x: bbox.x + bbox.width / 2, y: bbox.y + bbox.height / 2 } : null
+        };
     });
   
+  /**
+   * Determine the mermaid-style arrow string for an SVG path based on its CSS pattern class and presence of a start marker.
+   * @param {SVGElement|Element} pathEl - The SVG path element to inspect for pattern classes and `marker-start`.
+   * @returns {string} One of `"-->"`, `"-.->"`, or `"-..->"`, or the corresponding symmetric variants (`"<-->"`, `"<-.->"`, `"<-..->"`) when the element has a `marker-start`.
+   */
+  function getArrowForPath(pathEl) {
+      const cls = pathEl.getAttribute('class') || '';
+      let arrow = '-->';
+      if (cls.includes('edge-pattern-dashed')) {
+          arrow = '-.->';
+      } else if (cls.includes('edge-pattern-dotted')) {
+          arrow = '-..->';
+      }
+
+      const hasStart = Boolean(pathEl.getAttribute('marker-start'));
+      if (hasStart) {
+          if (arrow === '-->') return '<-->';
+          if (arrow === '-.->') return '<-.->';
+          if (arrow === '-..->') return '<-..->';
+      }
+      return arrow;
+  }
+
   svgElement.querySelectorAll('path.flowchart-link').forEach(path => {
         const pathId = path.id;
     if (!pathId) return;
@@ -263,7 +1461,7 @@ function convertFlowchartSvgToMermaidText(svgElement) {
                          sourceNode = foundSourceNode;
                          targetNode = foundTargetNode;
           break;
-                     }
+                      }
                 }
             }
         }
@@ -274,31 +1472,42 @@ function convertFlowchartSvgToMermaidText(svgElement) {
         }
 
         let label = "";
-        try {
-            const totalLength = path.getTotalLength();
-            if (totalLength > 0) {
-                const midPoint = path.getPointAtLength(totalLength / 2);
-        let closestLabel = null;
-        let closestDist = Infinity;
-                for (const labelId in edgeLabels) {
-                    const currentLabel = edgeLabels[labelId];
-                    const dist = Math.sqrt(Math.pow(currentLabel.x - midPoint.x, 2) + Math.pow(currentLabel.y - midPoint.y, 2));
-          if (dist < closestDist) {
-            closestDist = dist;
-                        closestLabel = currentLabel;
-          }
+        const edgeKey = path.getAttribute('data-id') || pathId;
+        if (edgeKey && edgeLabels[edgeKey]?.text) {
+            label = edgeLabels[edgeKey].text;
         }
-                if (closestLabel && closestDist < 75) {
-          label = closestLabel.text;
+
+        if (!label) {
+            try {
+                const totalLength = path.getTotalLength();
+                if (totalLength > 0) {
+                    const midPoint = path.getPointAtLength(totalLength / 2);
+                    let closestLabel = null;
+                    let closestDist = Infinity;
+                    for (const labelId in edgeLabels) {
+                        const currentLabel = edgeLabels[labelId];
+                        if (!currentLabel.center) continue;
+                        const dist = Math.sqrt(
+                            Math.pow(currentLabel.center.x - midPoint.x, 2) +
+                            Math.pow(currentLabel.center.y - midPoint.y, 2)
+                        );
+                        if (dist < closestDist) {
+                            closestDist = dist;
+                            closestLabel = currentLabel;
+                        }
+                    }
+                    if (closestLabel && closestDist < 90) {
+                        label = closestLabel.text;
+                    }
+                }
+            } catch (e) {
+                console.error("Error matching label for edge " + pathId, e);
+            }
         }
-      }
-        } catch (e) {
-            console.error("Error matching label for edge " + pathId, e);
-        }
-        
-        const labelPart = label ? `|"${label}"|` : "";
-    const edgeText = `${sourceNode.mermaidId} -->${labelPart} ${targetNode.mermaidId}`;
-    
+
+        const arrow = getArrowForPath(path);
+        const safeLabel = label ? label.replace(/"/g, '#quot;') : '';
+
         // Find Lowest Common Ancestor
         const sourceAncestors = [parentMap[sourceNode.svgId]];
         while (sourceAncestors[sourceAncestors.length - 1]) {
@@ -309,7 +1518,13 @@ function convertFlowchartSvgToMermaidText(svgElement) {
             lca = parentMap[lca];
         }
         
-        edges.push({ text: edgeText, parentId: lca || 'root' });
+        edges.push({
+            source: sourceNode.mermaidId,
+            target: targetNode.mermaidId,
+            label: safeLabel,
+            baseArrow: arrow,
+            parentId: lca || 'root'
+        });
     });
     
     // 5. Generate Mermaid output
@@ -333,10 +1548,37 @@ function convertFlowchartSvgToMermaidText(svgElement) {
         childrenMap[parentId].push(childId);
     }
     
+    const edgeKey = (source, target) => `${source}::${target}`;
+    const edgeSet = new Set(edges.map(edge => edgeKey(edge.source, edge.target)));
+
+    /**
+     * Normalize an arrow string to a dashed variant when dashed style is requested.
+     * @param {string} baseArrow - The original arrow string.
+     * @param {boolean} useDashed - If true, convert the arrow to a dashed form; if false, return the original.
+     * @returns {string} The normalized arrow: the original when `useDashed` is false; if `useDashed` is true, preserve arrows already containing `-..->`, map bidirectional forms (`<-->`, `<-.->`, `<-..->`) to `<-.->`, and otherwise return `-.->`.
+     */
+    function normalizeArrowForStyle(baseArrow, useDashed) {
+        if (!useDashed) return baseArrow;
+        if (baseArrow.includes('-..->')) {
+            return baseArrow;
+        }
+        if (baseArrow === '<-->' || baseArrow === '<-.->' || baseArrow === '<-..->') {
+            return '<-.->';
+        }
+        return '-.->';
+    }
+
     edges.forEach(edge => {
         const parentId = edge.parentId || 'root';
         if (!edgeMap[parentId]) edgeMap[parentId] = [];
-        edgeMap[parentId].push(edge.text);
+
+        const reverseExists = edgeSet.has(edgeKey(edge.target, edge.source));
+        const useDashed = Boolean(edge.label) || reverseExists;
+        const arrow = normalizeArrowForStyle(edge.baseArrow, useDashed);
+        const labelPart = edge.label ? `|"${edge.label}"|` : "";
+        const edgeText = `${edge.source} ${arrow}${labelPart} ${edge.target}`;
+
+        edgeMap[parentId].push(edgeText);
     });
     
     // Add top-level edges
@@ -1711,7 +2953,12 @@ function processNode(node) {
   return resultMd;
 }
 
-// Function to auto-detect programming language from code content
+/**
+ * Heuristically detect the programming or markup language of a code/text snippet.
+ *
+ * @param {string} codeText - Source code or text to analyze for language cues.
+ * @returns {string} The detected language identifier (e.g., `javascript`, `python`, `json`, `markdown`, `dockerfile`, etc.), or an empty string if no language could be determined.
+ */
 function detectCodeLanguage(codeText) {
   if (!codeText || codeText.trim().length < 10) return '';
   

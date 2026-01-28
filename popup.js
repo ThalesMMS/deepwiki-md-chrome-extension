@@ -12,12 +12,34 @@ document.addEventListener('DOMContentLoaded', () => {
 
   initializeBatchStatus();
 
+  /**
+   * Determine whether a URL corresponds to a supported site (DeepWiki or Devin).
+   * @param {string} url - The URL to check.
+   * @returns {boolean} `true` if the URL contains `deepwiki.com` or `devin.ai`, `false` otherwise.
+   */
+  function isValidSite(url) {
+    return url.includes('deepwiki.com') || url.includes('devin.ai');
+  }
+
+  /**
+   * Normalize a string into a filesystem-safe filename component.
+   * @param {string} name - The input name to normalize; if falsy, `"document"` is used.
+   * @returns {string} The sanitized filename where characters other than letters, digits, underscore, hyphen, or period are replaced with underscores and consecutive underscores are collapsed.
+   */
+  function sanitizeFilename(name) {
+    if (!name) return 'document';
+    // Replace characters that are not alphanumeric, underscore, hyphen, or period with an underscore
+    // Then replace multiple underscores with a single underscore
+    return name.replace(/[^a-z0-9_\-\.]/gi, '_').replace(/_+/g, '_');
+  }
+
   convertBtn.addEventListener('click', async () => {
     try {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
-      if (!tab.url.includes('deepwiki.com')) {
-        showStatus('Please use this extension on a DeepWiki page', 'error');
+      // VERIFICAÇÃO ATUALIZADA
+      if (!isValidSite(tab.url)) {
+        showStatus('Please use this extension on a DeepWiki or Devin page', 'error');
         return;
       }
 
@@ -27,9 +49,14 @@ document.addEventListener('DOMContentLoaded', () => {
       if (response && response.success) {
         const headTitle = response.headTitle || '';
         const currentTitle = response.markdownTitle;
+        
+        // Sanitize filename components
+        const sanitizedHeadTitle = sanitizeFilename(headTitle);
+        const sanitizedCurrentTitle = sanitizeFilename(currentTitle);
+
         const fileName = headTitle
-          ? `${headTitle}-${currentTitle}.md`
-          : `${currentTitle}.md`;
+          ? `${sanitizedHeadTitle}-${sanitizedCurrentTitle}.md`
+          : `${sanitizedCurrentTitle}.md`;
 
         const blob = new Blob([response.markdown], { type: 'text/markdown' });
         const url = URL.createObjectURL(blob);
@@ -50,11 +77,14 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   batchDownloadBtn.addEventListener('click', async () => {
+    console.log('[Popup] Batch Convert button clicked!');
     try {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      console.log('[Popup] Active tab:', tab.url);
 
-      if (!tab.url.includes('deepwiki.com')) {
-        showStatus('Please use this extension on a DeepWiki page', 'error');
+      // VERIFICAÇÃO ATUALIZADA
+      if (!isValidSite(tab.url)) {
+        showStatus('Please use this extension on a DeepWiki or Devin page', 'error');
         return;
       }
 
@@ -122,6 +152,11 @@ document.addEventListener('DOMContentLoaded', () => {
     batchDownloadBtn.disabled = disable;
   }
 
+  /**
+   * Update the status display text and apply a CSS class for the given status type.
+   * @param {string} message - Text to display in the status element.
+   * @param {string} type - CSS class name representing the status level (e.g., 'info', 'success', 'error').
+   */
   function showStatus(message, type) {
     status.textContent = message;
     status.className = type;
