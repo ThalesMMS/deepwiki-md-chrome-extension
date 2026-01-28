@@ -445,8 +445,6 @@ function isHashChange(currentUrl, targetUrl) {
 async function navigateToPage(tabId, url) {
   const tab = await getTabById(tabId);
   const hashOnly = isHashChange(tab.url, url);
-
-  markTabPending(tabId);
   
   if (hashOnly) {
      console.log('[Background] Hash change detected. Injecting location update script.');
@@ -477,6 +475,8 @@ async function navigateToPage(tabId, url) {
      }
      return;
   }
+
+  markTabPending(tabId);
 
   return new Promise((resolve, reject) => {
     chrome.tabs.update(tabId, { url }, () => {
@@ -525,6 +525,7 @@ async function processSinglePage(page) {
   });
 
   const tab = await getTabById(batchState.tabId);
+  const isDevinTopic = Number.isInteger(page.devinIndex);
 
   // Parse URLs for comparison
   let currentUrl, targetUrl;
@@ -547,45 +548,67 @@ async function processSinglePage(page) {
     currentUrl: tab.url,
     targetUrl: page.url,
     samePage,
-    targetHash: targetHash || '(none)'
+    targetHash: targetHash || '(none)',
+    devinTopic: isDevinTopic
   });
 
-  if (samePage) {
-    // Same page - use hash navigation (no page reload)
-    if (targetHash && targetHash !== currentUrl.hash) {
-      // Navigate to a different hash
-      console.log('[Background] Hash navigation to:', targetHash);
-      try {
-        await chrome.scripting.executeScript({
-          target: { tabId: batchState.tabId },
-          func: (newHash) => {
-            window.location.hash = newHash;
-          },
-          args: [targetHash]
-        });
-        await sleep(500);
-      } catch (err) {
-        console.warn('[Background] Hash navigation failed:', err);
-      }
-    } else if (!targetHash || targetHash === currentUrl.hash) {
-      // Same hash or base URL - no navigation needed
-      console.log('[Background] Same location or base URL - no navigation');
-      await sleep(100);
+  let readiness = null;
+
+  if (isDevinTopic) {
+    if (!samePage) {
+      console.log('[Background] Devin topic: navigating to base page:', page.url);
+      await navigateToPage(batchState.tabId, page.url);
     }
+
+    const selection = await sendMessageToTab(batchState.tabId, {
+      action: 'selectDevinTopic',
+      index: page.devinIndex,
+      title: page.title
+    });
+    if (!selection || !selection.success) {
+      throw new Error(selection?.error || 'Failed to select Devin topic.');
+    }
+
+    readiness = await waitForPageContent(batchState.tabId, page.url);
   } else {
-    // Different page - full navigation
-    console.log('[Background] Full page navigation to:', page.url);
-    await navigateToPage(batchState.tabId, page.url);
+    if (samePage) {
+      // Same page - use hash navigation (no page reload)
+      if (targetHash && targetHash !== currentUrl.hash) {
+        // Navigate to a different hash
+        console.log('[Background] Hash navigation to:', targetHash);
+        try {
+          await chrome.scripting.executeScript({
+            target: { tabId: batchState.tabId },
+            func: (newHash) => {
+              window.location.hash = newHash;
+            },
+            args: [targetHash]
+          });
+          await sleep(500);
+        } catch (err) {
+          console.warn('[Background] Hash navigation failed:', err);
+        }
+      } else if (!targetHash || targetHash === currentUrl.hash) {
+        // Same hash or base URL - no navigation needed
+        console.log('[Background] Same location or base URL - no navigation');
+        await sleep(100);
+      }
+    } else {
+      // Different page - full navigation
+      console.log('[Background] Full page navigation to:', page.url);
+      await navigateToPage(batchState.tabId, page.url);
+    }
+
+    if (batchState.cancelRequested) return;
+
+    // For same-page (hash) navigation, skip heavy content waiting - content is already loaded
+    if (!samePage) {
+      // Aguarda conteúdo real renderizar (para navegação entre páginas diferentes)
+      readiness = await waitForPageContent(batchState.tabId, page.url);
+    }
   }
 
   if (batchState.cancelRequested) return;
-
-  // For same-page (hash) navigation, skip heavy content waiting - content is already loaded
-  let readiness = null;
-  if (!samePage) {
-    // Aguarda conteúdo real renderizar (para navegação entre páginas diferentes)
-    readiness = await waitForPageContent(batchState.tabId, page.url);
-  }
 
   let convertResponse = await sendMessageToTab(batchState.tabId, { action: 'convertToMarkdown' });
   if (!convertResponse || !convertResponse.success) {
@@ -804,9 +827,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
 
     if (!messageQueue[tabId]) {
-      messageQueue[tabId] = { isReady: true, queue: [] };
+      messageQueue[tabId] = { isReady: true, queue: [], lastUrl: sender.tab?.url };
     } else {
       messageQueue[tabId].isReady = true;
+      if (sender.tab?.url) {
+        messageQueue[tabId].lastUrl = sender.tab.url;
+      }
     }
     flushMessageQueue(tabId);
     sendResponse({ status: 'ready' });
@@ -855,7 +881,24 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   // Only mark as pending for actual page navigation, NOT hash-only changes
   // Hash-only changes don't reload the content script, so we shouldn't block messages
   if (changeInfo.status === 'loading') {
-    markTabPending(tabId);
+    const entry = messageQueue[tabId];
+    if (entry && entry.lastUrl) {
+      try {
+        const oldUrl = new URL(entry.lastUrl);
+        const newUrl = new URL(tab.url || changeInfo.url || entry.lastUrl);
+        const sameBase = oldUrl.origin === newUrl.origin &&
+                         oldUrl.pathname === newUrl.pathname;
+        if (!sameBase) {
+          markTabPending(tabId);
+        } else {
+          console.log('[Background] Hash-only loading detected, not marking pending:', newUrl.href);
+        }
+      } catch (e) {
+        markTabPending(tabId);
+      }
+    } else {
+      markTabPending(tabId);
+    }
   } else if (changeInfo.url) {
     // Check if this is just a hash change (same page, different hash)
     const entry = messageQueue[tabId];

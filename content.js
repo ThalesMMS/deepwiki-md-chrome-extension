@@ -1,3 +1,69 @@
+function normalizeUrlKey(urlObj) {
+  try {
+    const normalized = new URL(urlObj.href);
+    const path = normalized.pathname.replace(/\/$/, '');
+    normalized.pathname = path === '' ? '/' : path;
+    return `${normalized.origin}${normalized.pathname}${normalized.search}${normalized.hash}`;
+  } catch (e) {
+    return urlObj.href;
+  }
+}
+
+function getElementTitle(element) {
+  const rawText = (element.textContent || '').replace(/\s+/g, ' ').trim();
+  if (rawText) return rawText;
+  const aria = element.getAttribute('aria-label') || element.getAttribute('title') || element.getAttribute('data-title');
+  if (aria) return aria.trim();
+  const imgAlt = element.querySelector('img[alt]')?.getAttribute('alt');
+  return imgAlt ? imgAlt.trim() : '';
+}
+
+function expandAllNavSections(navRoot) {
+  const toggles = Array.from(navRoot.querySelectorAll(
+    'button[aria-expanded="false"], [role="button"][aria-expanded="false"], details:not([open]) > summary, [data-state="closed"][aria-controls]'
+  )).filter(el => el.tagName !== 'A');
+
+  toggles.forEach(toggle => {
+    if (toggle.tagName === 'SUMMARY') {
+      const details = toggle.closest('details');
+      if (details && !details.open) {
+        details.open = true;
+      }
+    } else if (typeof toggle.click === 'function') {
+      toggle.click();
+    }
+  });
+
+  return toggles.length;
+}
+
+function findDevinTopicButtons() {
+  const containers = Array.from(document.querySelectorAll(
+    'aside, nav, [class*="border-r"], [class*="sidebar"], [class*="drawer"]'
+  ));
+
+  const buttons = [];
+  const seen = new Set();
+  containers.forEach(container => {
+    expandAllNavSections(container);
+    const listButtons = Array.from(container.querySelectorAll('ul li button'));
+    listButtons.forEach(btn => {
+      const title = getElementTitle(btn);
+      if (title && !seen.has(btn)) {
+        seen.add(btn);
+        buttons.push(btn);
+      }
+    });
+  });
+
+  if (buttons.length) {
+    return buttons;
+  }
+
+  // Fallback: any buttons inside list items
+  return Array.from(document.querySelectorAll('ul li button')).filter(btn => getElementTitle(btn));
+}
+
 // Listen for messages from popup
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === "convertToMarkdown") {
@@ -44,7 +110,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       sendResponse({ success: false, error: error.message });
     }
   } else if (request.action === "extractAllPages") {
-    try {
+    (async () => {
+      try {
       const headTitle = document.title || "";
       const formattedHeadTitle = headTitle.replace(/[\/|]/g, '-').replace(/\s+/g, '-').replace('---','-');
       const baseUrl = window.location.href;
@@ -121,9 +188,41 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       let sidebarLinks = [];
       const currentPathNormalized = currentPath.replace(/\/$/, '');
 
-      // For Devin.ai: Topics are hash sections on the same page
-      // Search entire document for numeric hash links (topic links)
+      // For Devin.ai: Prefer sidebar buttons (no hrefs), fallback to numeric hash links
       if (isDevinAi) {
+        const devinButtons = findDevinTopicButtons();
+        if (devinButtons.length > 0) {
+          console.log('[Batch Debug] Devin.ai mode: Found topic buttons:', devinButtons.length);
+          const pages = devinButtons.map((btn, index) => {
+            const title = getElementTitle(btn) || `Topic ${index + 1}`;
+            const selected =
+              btn.getAttribute('aria-current') === 'true' ||
+              btn.getAttribute('aria-selected') === 'true' ||
+              btn.classList.contains('selected') ||
+              btn.classList.contains('active');
+            return {
+              url: baseUrl,
+              title,
+              selected,
+              devinIndex: index
+            };
+          });
+
+          const currentPageTitle =
+            document.querySelector("main h1")?.textContent?.trim() ||
+            document.querySelector("h1")?.textContent?.trim() ||
+            "Untitled";
+
+          sendResponse({
+            success: true,
+            pages,
+            currentTitle: currentPageTitle,
+            baseUrl: baseUrl,
+            headTitle: formattedHeadTitle
+          });
+          return;
+        }
+
         console.log('[Batch Debug] Devin.ai mode: Searching for numeric hash topic links...');
 
         // Find ALL links in the document
@@ -184,9 +283,15 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         }
 
         if (navContainers.length > 0) {
-          let bestNav = navContainers[0];
-          let bestScore = -1;
+          let expandedCount = 0;
+          navContainers.forEach(nav => {
+            expandedCount += expandAllNavSections(nav);
+          });
+          if (expandedCount > 0) {
+            await new Promise(resolve => setTimeout(resolve, 250));
+          }
 
+          const navCandidates = [];
           navContainers.forEach(nav => {
             const links = Array.from(nav.querySelectorAll("a"));
             if (links.length === 0) return;
@@ -207,15 +312,27 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
             const ratio = sameOriginCount > 0 ? projectMatchCount / sameOriginCount : 0;
             const score = projectMatchCount * 10 + ratio;
-
-            if (score > bestScore) {
-              bestScore = score;
-              bestNav = nav;
-            }
+            navCandidates.push({ nav, links, sameOriginCount, projectMatchCount, score });
           });
 
-          console.log('[Batch Debug] Selected Nav Score:', bestScore);
-          sidebarLinks = Array.from(bestNav.querySelectorAll('a'));
+          if (navCandidates.length > 0) {
+            const sorted = navCandidates.slice().sort((a, b) => b.score - a.score);
+            const best = sorted[0];
+            const minProjectMatches = Math.max(2, Math.floor(best.projectMatchCount * 0.6));
+            let chosen = navCandidates.filter(candidate => candidate.projectMatchCount >= minProjectMatches);
+            if (!chosen.length) {
+              chosen = [best];
+            }
+
+            console.log('[Batch Debug] Selected Navs:', {
+              expandedCount,
+              bestScore: best.score,
+              minProjectMatches,
+              chosenCount: chosen.length
+            });
+
+            sidebarLinks = chosen.flatMap(candidate => candidate.links);
+          }
         }
 
         // Fallback específico para DeepWiki original (listas aninhadas)
@@ -244,7 +361,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
            if (!matchesProjectPrefix(urlObj)) return false;
          }
 
-         const text = link.textContent.trim().toLowerCase();
+         const fallbackTitle = urlObj.hash ? `Topic-${urlObj.hash.replace('#', '')}` : '';
+         const title = getElementTitle(link) || fallbackTitle;
+         const text = title.toLowerCase();
          if (['logout', 'sign out', 'settings', 'profile', 'home'].includes(text)) return false;
          if (text.length === 0) return false;
 
@@ -262,10 +381,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         const urlObj = resolveUrl(link.getAttribute('href'));
         if (!urlObj) return;
         const fullUrl = urlObj.href; // Includes Hash
-        if (!uniquePagesMap.has(fullUrl)) {
-            uniquePagesMap.set(fullUrl, {
+        const key = normalizeUrlKey(urlObj);
+        if (!uniquePagesMap.has(key)) {
+            const fallbackTitle = urlObj.hash ? `Topic-${urlObj.hash.replace('#', '')}` : '';
+            const linkTitle = getElementTitle(link) || fallbackTitle || "Untitled Page";
+            uniquePagesMap.set(key, {
                 url: fullUrl,
-                title: link.textContent.trim() || "Untitled Page",
+                title: linkTitle,
                 selected: link.getAttribute('data-selected') === 'true' || link.classList.contains('active') || link.classList.contains('selected')
             });
         }
@@ -273,12 +395,34 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       
       console.log('[Batch Debug] Unique Hashes/Pages:', uniquePagesMap.size);
 
-      const pages = Array.from(uniquePagesMap.values());
+      let pages = Array.from(uniquePagesMap.values());
       
       const currentPageTitle =
         document.querySelector("main h1")?.textContent?.trim() ||
         document.querySelector("h1")?.textContent?.trim() || 
         "Untitled";
+
+      try {
+        const currentUrlObj = new URL(baseUrl);
+        const currentKey = normalizeUrlKey(currentUrlObj);
+        const hasCurrent = pages.some(page => {
+          try {
+            return normalizeUrlKey(new URL(page.url)) === currentKey;
+          } catch (e) {
+            return false;
+          }
+        });
+        if (!hasCurrent) {
+          pages = [{
+            url: currentUrlObj.href,
+            title: currentPageTitle || "Untitled",
+            selected: true
+          }, ...pages];
+          console.log('[Batch Debug] Added current page explicitly:', currentUrlObj.href);
+        }
+      } catch (e) {
+        console.warn('[Batch Debug] Failed to add current page explicitly:', e.message);
+      }
         
       sendResponse({ 
         success: true, 
@@ -287,10 +431,81 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         baseUrl: baseUrl,
         headTitle: formattedHeadTitle
       });
-    } catch (error) {
-      console.error("Error extracting page links:", error);
-      sendResponse({ success: false, error: error.message });
-    }
+      } catch (error) {
+        console.error("Error extracting page links:", error);
+        sendResponse({ success: false, error: error.message });
+      }
+    })();
+    return true;
+  } else if (request.action === "selectDevinTopic") {
+    (async () => {
+      try {
+        const buttons = findDevinTopicButtons();
+        if (!buttons.length) {
+          throw new Error('No Devin topic buttons found.');
+        }
+
+        const index = Number.isInteger(request.index) ? request.index : -1;
+        const targetTitle = typeof request.title === 'string' ? request.title.trim() : '';
+
+        let targetButton = null;
+        if (targetTitle) {
+          targetButton = buttons.find(btn => getElementTitle(btn) === targetTitle);
+          if (!targetButton) {
+            targetButton = buttons.find(btn => getElementTitle(btn).includes(targetTitle));
+          }
+        }
+        if (!targetButton && index >= 0 && index < buttons.length) {
+          targetButton = buttons[index];
+        }
+        if (!targetButton) {
+          throw new Error('Unable to resolve Devin topic button.');
+        }
+
+        const expectedTitle = getElementTitle(targetButton);
+        const startHash = window.location.hash;
+
+        if (typeof targetButton.scrollIntoView === 'function') {
+          targetButton.scrollIntoView({ block: 'center' });
+        }
+        if (typeof targetButton.click === 'function') {
+          targetButton.click();
+        }
+
+        const deadline = Date.now() + 2500;
+        while (Date.now() < deadline) {
+          if (window.location.hash && window.location.hash !== startHash) {
+            break;
+          }
+          if (expectedTitle) {
+            const headings = Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, h6'));
+            const matches = headings.some(h => (h.textContent || '').trim() === expectedTitle);
+            if (matches) {
+              break;
+            }
+          }
+          if (
+            targetButton.getAttribute('aria-selected') === 'true' ||
+            targetButton.getAttribute('aria-current') === 'true' ||
+            targetButton.classList.contains('active') ||
+            targetButton.classList.contains('selected')
+          ) {
+            break;
+          }
+          await new Promise(resolve => setTimeout(resolve, 120));
+        }
+
+        sendResponse({
+          success: true,
+          selectedIndex: buttons.indexOf(targetButton),
+          selectedTitle: expectedTitle
+        });
+      } catch (error) {
+        console.error('Error selecting Devin topic:', error);
+        sendResponse({ success: false, error: error.message });
+      }
+    })();
+    return true;
   } else if (request.action === "waitForContentReady") {
     waitForContentReady(request)
       .then(response => sendResponse(response))
