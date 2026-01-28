@@ -1189,17 +1189,46 @@ function convertFlowchartSvgToMermaidText(svgElement) {
     const edges = [];
     const edgeLabels = {};
     svgElement.querySelectorAll('g.edgeLabel').forEach(labelEl => {
-        const text = labelEl.textContent?.trim();
-        const bbox = labelEl.getBoundingClientRect();
-        if(text) {
-             edgeLabels[labelEl.id] = {
-                text,
-                x: bbox.left + bbox.width / 2,
-                y: bbox.top + bbox.height / 2
-            };
+        const labelCarrier = labelEl.querySelector('[data-id]') || labelEl;
+        const labelId = labelCarrier.getAttribute('data-id') || labelEl.getAttribute('data-id') || labelEl.id;
+        if (!labelId) return;
+
+        const textEl = labelEl.querySelector('foreignObject p, foreignObject span, text');
+        const text = (textEl ? textEl.textContent : labelEl.textContent || '').trim();
+        if (!text) return;
+
+        let bbox = null;
+        try {
+            bbox = labelEl.getBBox();
+        } catch (e) {
+            // ignore
         }
+
+        const hasBbox = bbox && Number.isFinite(bbox.x) && Number.isFinite(bbox.y);
+        edgeLabels[labelId] = {
+            text,
+            center: hasBbox ? { x: bbox.x + bbox.width / 2, y: bbox.y + bbox.height / 2 } : null
+        };
     });
   
+  function getArrowForPath(pathEl) {
+      const cls = pathEl.getAttribute('class') || '';
+      let arrow = '-->';
+      if (cls.includes('edge-pattern-dashed')) {
+          arrow = '-.->';
+      } else if (cls.includes('edge-pattern-dotted')) {
+          arrow = '-..->';
+      }
+
+      const hasStart = Boolean(pathEl.getAttribute('marker-start'));
+      if (hasStart) {
+          if (arrow === '-->') return '<-->';
+          if (arrow === '-.->') return '<-.->';
+          if (arrow === '-..->') return '<-..->';
+      }
+      return arrow;
+  }
+
   svgElement.querySelectorAll('path.flowchart-link').forEach(path => {
         const pathId = path.id;
     if (!pathId) return;
@@ -1247,30 +1276,43 @@ function convertFlowchartSvgToMermaidText(svgElement) {
         }
 
         let label = "";
-        try {
-            const totalLength = path.getTotalLength();
-            if (totalLength > 0) {
-                const midPoint = path.getPointAtLength(totalLength / 2);
-        let closestLabel = null;
-        let closestDist = Infinity;
-                for (const labelId in edgeLabels) {
-                    const currentLabel = edgeLabels[labelId];
-                    const dist = Math.sqrt(Math.pow(currentLabel.x - midPoint.x, 2) + Math.pow(currentLabel.y - midPoint.y, 2));
-          if (dist < closestDist) {
-            closestDist = dist;
-                        closestLabel = currentLabel;
-          }
+        const edgeKey = path.getAttribute('data-id') || pathId;
+        if (edgeKey && edgeLabels[edgeKey]?.text) {
+            label = edgeLabels[edgeKey].text;
         }
-                if (closestLabel && closestDist < 75) {
-          label = closestLabel.text;
+
+        if (!label) {
+            try {
+                const totalLength = path.getTotalLength();
+                if (totalLength > 0) {
+                    const midPoint = path.getPointAtLength(totalLength / 2);
+                    let closestLabel = null;
+                    let closestDist = Infinity;
+                    for (const labelId in edgeLabels) {
+                        const currentLabel = edgeLabels[labelId];
+                        if (!currentLabel.center) continue;
+                        const dist = Math.sqrt(
+                            Math.pow(currentLabel.center.x - midPoint.x, 2) +
+                            Math.pow(currentLabel.center.y - midPoint.y, 2)
+                        );
+                        if (dist < closestDist) {
+                            closestDist = dist;
+                            closestLabel = currentLabel;
+                        }
+                    }
+                    if (closestLabel && closestDist < 90) {
+                        label = closestLabel.text;
+                    }
+                }
+            } catch (e) {
+                console.error("Error matching label for edge " + pathId, e);
+            }
         }
-      }
-        } catch (e) {
-            console.error("Error matching label for edge " + pathId, e);
-        }
-        
-        const labelPart = label ? `|"${label}"|` : "";
-    const edgeText = `${sourceNode.mermaidId} -->${labelPart} ${targetNode.mermaidId}`;
+
+        const arrow = getArrowForPath(path);
+        const safeLabel = label ? label.replace(/"/g, '#quot;') : '';
+        const labelPart = safeLabel ? `|"${safeLabel}"|` : "";
+        const edgeText = `${sourceNode.mermaidId} ${arrow}${labelPart} ${targetNode.mermaidId}`;
     
         // Find Lowest Common Ancestor
         const sourceAncestors = [parentMap[sourceNode.svgId]];
