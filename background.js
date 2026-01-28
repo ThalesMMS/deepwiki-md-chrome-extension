@@ -524,40 +524,66 @@ async function processSinglePage(page) {
     message: `Processing ${currentStep}/${batchState.total}: ${page.title}`
   });
 
-  // Check if this is a hash-only change (same page, different section)
   const tab = await getTabById(batchState.tabId);
-  const hashOnly = isHashChange(tab.url, page.url);
 
-  if (hashOnly) {
-    // For hash-only changes, just update the hash and wait briefly for SPA to update
-    console.log('[Background] Hash-only navigation to:', page.url);
-    try {
-      await chrome.scripting.executeScript({
-        target: { tabId: batchState.tabId },
-        func: (destUrl) => {
-          const u = new URL(destUrl);
-          if (window.location.hash !== u.hash) {
-            window.location.hash = u.hash;
-          }
-        },
-        args: [page.url]
-      });
-      // Brief wait for SPA to update content
-      await sleep(500);
-    } catch (err) {
-      console.warn('[Background] Hash navigation failed:', err);
+  // Parse URLs for comparison
+  let currentUrl, targetUrl;
+  try {
+    currentUrl = new URL(tab.url);
+    targetUrl = new URL(page.url);
+  } catch (e) {
+    console.warn('[Background] URL parse error:', e.message);
+    // Fallback to full navigation
+    await navigateToPage(batchState.tabId, page.url);
+    return;
+  }
+
+  // Check if same page (same origin + pathname)
+  const samePage = currentUrl.origin === targetUrl.origin &&
+                   currentUrl.pathname.replace(/\/$/, '') === targetUrl.pathname.replace(/\/$/, '');
+  const targetHash = targetUrl.hash;
+
+  console.log('[Background] Navigation check:', {
+    currentUrl: tab.url,
+    targetUrl: page.url,
+    samePage,
+    targetHash: targetHash || '(none)'
+  });
+
+  if (samePage) {
+    // Same page - use hash navigation (no page reload)
+    if (targetHash && targetHash !== currentUrl.hash) {
+      // Navigate to a different hash
+      console.log('[Background] Hash navigation to:', targetHash);
+      try {
+        await chrome.scripting.executeScript({
+          target: { tabId: batchState.tabId },
+          func: (newHash) => {
+            window.location.hash = newHash;
+          },
+          args: [targetHash]
+        });
+        await sleep(500);
+      } catch (err) {
+        console.warn('[Background] Hash navigation failed:', err);
+      }
+    } else if (!targetHash || targetHash === currentUrl.hash) {
+      // Same hash or base URL - no navigation needed
+      console.log('[Background] Same location or base URL - no navigation');
+      await sleep(100);
     }
   } else {
-    // Full page navigation
+    // Different page - full navigation
+    console.log('[Background] Full page navigation to:', page.url);
     await navigateToPage(batchState.tabId, page.url);
   }
 
   if (batchState.cancelRequested) return;
 
-  // For hash navigation, skip heavy content waiting - content is already loaded
+  // For same-page (hash) navigation, skip heavy content waiting - content is already loaded
   let readiness = null;
-  if (!hashOnly) {
-    // Aguarda conteúdo real renderizar (importante para SPA como app.devin.ai)
+  if (!samePage) {
+    // Aguarda conteúdo real renderizar (para navegação entre páginas diferentes)
     readiness = await waitForPageContent(batchState.tabId, page.url);
   }
 
