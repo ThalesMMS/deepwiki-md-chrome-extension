@@ -50,26 +50,55 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       const baseUrl = window.location.href;
       const baseOrigin = window.location.origin;
       const currentPath = window.location.pathname || "/";
+      const hostname = window.location.hostname;
+
+      // Detect site type for appropriate prefix depth
+      const isDevinAi = hostname.includes('devin.ai');
 
       // Deriva prefixos do "projeto atual" a partir da URL corrente
       const pathSegments = currentPath.split("/").filter(Boolean);
-      const prefixCandidates = new Set();
-      for (let len = 2; len <= Math.min(4, pathSegments.length); len++) {
-        prefixCandidates.add(`/${pathSegments.slice(0, len).join("/")}`);
-      }
-      if (pathSegments.length > 1) {
-        prefixCandidates.add(`/${pathSegments.slice(0, -1).join("/")}`);
-      } else if (pathSegments.length === 1) {
-        prefixCandidates.add(`/${pathSegments[0]}`);
-      }
 
-      const prefixList = Array.from(prefixCandidates).sort((a, b) => b.length - a.length);
+      // For Devin.ai: /wiki/{owner} is the project scope (owner level, not page level)
+      // For DeepWiki: /wiki/{owner}/{repo} is the project scope
+      const markerIdx = pathSegments.findIndex(seg => ['deepwiki', 'wiki', 'docs'].includes(seg.toLowerCase()));
+
       let defaultPrefix = "/";
-      if (pathSegments.length >= 2) {
+      if (markerIdx >= 0) {
+        if (isDevinAi) {
+          // Devin.ai: /wiki/Owner is the project prefix
+          const segmentsAfterMarker = pathSegments.length - (markerIdx + 1);
+          if (segmentsAfterMarker >= 1) {
+            defaultPrefix = `/${pathSegments.slice(0, markerIdx + 2).join("/")}`;
+          } else {
+            defaultPrefix = `/${pathSegments.slice(0, markerIdx + 1).join("/")}`;
+          }
+        } else {
+          // DeepWiki: /wiki/Owner/Repo is the project prefix
+          const segmentsAfterMarker = pathSegments.length - (markerIdx + 1);
+          if (segmentsAfterMarker >= 2) {
+            defaultPrefix = `/${pathSegments.slice(0, markerIdx + 3).join("/")}`;
+          } else {
+            defaultPrefix = `/${pathSegments.slice(0, markerIdx + 2).join("/")}`;
+          }
+        }
+      } else if (pathSegments.length >= 2) {
         defaultPrefix = `/${pathSegments.slice(0, 2).join("/")}`;
       } else if (pathSegments.length === 1) {
         defaultPrefix = `/${pathSegments[0]}`;
       }
+
+      // Only generate prefix candidates at or shorter than the default prefix depth
+      const prefixCandidates = new Set();
+      const defaultDepth = defaultPrefix.split("/").filter(Boolean).length;
+      for (let len = 2; len <= defaultDepth; len++) {
+        if (len <= pathSegments.length) {
+          prefixCandidates.add(`/${pathSegments.slice(0, len).join("/")}`);
+        }
+      }
+      // Always include the computed default
+      prefixCandidates.add(defaultPrefix);
+
+      const prefixList = Array.from(prefixCandidates).sort((a, b) => b.length - a.length);
 
       function resolveUrl(href) {
         try {
@@ -79,141 +108,147 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         }
       }
 
-      let bestPrefix = defaultPrefix;
+      // Use the computed default prefix directly - it already accounts for site-specific structure
+      const bestPrefix = defaultPrefix;
 
       function matchesProjectPrefix(urlObj) {
         if (!urlObj) return false;
         if (!bestPrefix) return true;
         return urlObj.pathname.startsWith(bestPrefix);
       }
-      
-      // --- ESTRATÉGIA DE SELEÇÃO DE BARRA LATERAL (Correção para Devin.ai) ---
+
+      // --- ESTRATÉGIA DE SELEÇÃO DE BARRA LATERAL ---
       let sidebarLinks = [];
-      
-      // 1. Tenta containers semânticos ou de navegação comuns
-      // No Devin/DeepWiki, a sidebar geralmente está à esquerda.
-      // Procuramos containers que pareçam ser de navegação.
-      const navContainers = Array.from(
-        document.querySelectorAll('nav, aside, .sidebar, [class*="sidebar"], [class*="Sidebar"], [class*="menu"], [class*="drawer"]')
-      );
+      const currentPathNormalized = currentPath.replace(/\/$/, '');
 
-      // Calcula um prefixo mais específico com base nos próprios links disponíveis
-      if (navContainers.length > 0 && prefixList.length > 0) {
-        const allLinkPaths = navContainers
-          .flatMap(nav => Array.from(nav.querySelectorAll("a")))
-          .map(link => resolveUrl(link.getAttribute("href")))
-          .filter(urlObj => urlObj && urlObj.origin === baseOrigin)
-          .map(urlObj => urlObj.pathname);
+      // For Devin.ai: Topics are hash sections on the same page
+      // Search the ENTIRE document for links pointing to current page (with any hash or no hash)
+      if (isDevinAi) {
+        console.log('[Batch Debug] Devin.ai mode: Searching for ALL links to current page...');
 
-        let bestCount = -1;
-        
-        // Prefer longer prefixes (deeper paths) to avoid capturing organization-wide links
-        // sort by length descending is key
-        prefixList.sort((a, b) => b.length - a.length);
+        // Find ALL links in the document that point to the current page
+        const allLinks = Array.from(document.querySelectorAll('a[href]'));
+        const samePageLinks = allLinks.filter(link => {
+          const href = link.getAttribute('href');
+          if (!href) return false;
 
-        for (const prefix of prefixList) {
-          const count = allLinkPaths.filter(path => path.startsWith(prefix)).length;
-          // Only switch if this prefix actually has a decent number of links (e.g. > 1)
-          if (count > 0) {
-             // Since we sorted by length descending, the first one that matches the current project structure is likely best.
-             // We prioritize the one that matches our current location best.
-             if (currentPath.startsWith(prefix)) {
-                 bestPrefix = prefix;
-                 bestCount = count;
-                 break; 
-             }
-             // Fallback logic
-             if (count > bestCount) {
-                 bestPrefix = prefix;
-                 bestCount = count;
-             }
-          }
-        }
-        console.log("DeepWiki Batch Debug:", {
-          totalLinksScanned: allLinkPaths.length,
-          candidates: prefixList,
-          chosenPrefix: bestPrefix,
-          matchCount: bestCount,
-          currentPath
+          // Direct hash links like #2, #3, #section-name, etc.
+          if (href.startsWith('#')) return true;
+
+          // Full URL links to current page (with or without hash)
+          const urlObj = resolveUrl(href);
+          if (!urlObj) return false;
+          const linkPathNormalized = urlObj.pathname.replace(/\/$/, '');
+
+          // Must be same page path
+          return linkPathNormalized === currentPathNormalized;
         });
+
+        console.log('[Batch Debug] Found same-page links:', samePageLinks.length);
+        if (samePageLinks.length > 0) {
+          console.log('[Batch Debug] Sample links:', samePageLinks.slice(0, 10).map(l => l.getAttribute('href')));
+        }
+
+        sidebarLinks = samePageLinks;
       } else {
-        console.log("DeepWiki Batch Debug: No nav containers or prefixes found.");
-      }
-      
-      if (navContainers.length > 0) {
-        // Escolhe o container com mais links que parecem pertencer ao projeto atual
-        let bestNav = navContainers[0];
-        let bestScore = -1;
+        // DeepWiki: Use nav container selection
+        const navContainers = Array.from(
+          document.querySelectorAll('nav, aside, .sidebar, [class*="sidebar"], [class*="Sidebar"], [class*="menu"], [class*="drawer"]')
+        );
 
-        navContainers.forEach(nav => {
-          const links = Array.from(nav.querySelectorAll("a"));
-          if (links.length === 0) return;
+        // Log prefix info for debugging
+        if (navContainers.length > 0) {
+          const allLinkPaths = navContainers
+            .flatMap(nav => Array.from(nav.querySelectorAll("a")))
+            .map(link => resolveUrl(link.getAttribute("href")))
+            .filter(urlObj => urlObj && urlObj.origin === baseOrigin)
+            .map(urlObj => urlObj.pathname);
 
-          let sameOriginCount = 0;
-          let projectMatchCount = 0;
+          const matchCount = allLinkPaths.filter(path => path.startsWith(bestPrefix)).length;
 
-          links.forEach(link => {
-            const href = link.getAttribute("href");
-            if (!href) return;
-            const urlObj = resolveUrl(href);
-            if (!urlObj || urlObj.origin !== baseOrigin) return;
-            sameOriginCount += 1;
-            if (matchesProjectPrefix(urlObj)) {
-              projectMatchCount += 1;
+          console.log("DeepWiki Batch Debug:", {
+            totalLinksScanned: allLinkPaths.length,
+            siteType: 'deepwiki',
+            chosenPrefix: bestPrefix,
+            matchCount: matchCount,
+            currentPath
+          });
+        } else {
+          console.log("DeepWiki Batch Debug: No nav containers found.");
+        }
+
+        if (navContainers.length > 0) {
+          let bestNav = navContainers[0];
+          let bestScore = -1;
+
+          navContainers.forEach(nav => {
+            const links = Array.from(nav.querySelectorAll("a"));
+            if (links.length === 0) return;
+
+            let sameOriginCount = 0;
+            let projectMatchCount = 0;
+
+            links.forEach(link => {
+              const href = link.getAttribute("href");
+              if (!href) return;
+              const urlObj = resolveUrl(href);
+              if (!urlObj || urlObj.origin !== baseOrigin) return;
+              sameOriginCount += 1;
+              if (matchesProjectPrefix(urlObj)) {
+                projectMatchCount += 1;
+              }
+            });
+
+            const ratio = sameOriginCount > 0 ? projectMatchCount / sameOriginCount : 0;
+            const score = projectMatchCount * 10 + ratio;
+
+            if (score > bestScore) {
+              bestScore = score;
+              bestNav = nav;
             }
           });
 
-          // Score prioriza links do projeto atual e a proporção desses links
-          const ratio = sameOriginCount > 0 ? projectMatchCount / sameOriginCount : 0;
-          const score = projectMatchCount * 10 + ratio;
+          console.log('[Batch Debug] Selected Nav Score:', bestScore);
+          sidebarLinks = Array.from(bestNav.querySelectorAll('a'));
+        }
 
-          console.log('[Batch Debug] Nav Scan:', { 
-             elementClass: nav.className, 
-             totalLinks: links.length, 
-             projectMatches: projectMatchCount, 
-             score: score 
-          });
-
-          if (score > bestScore) {
-            bestScore = score;
-            bestNav = nav;
-          }
-        });
-
-        console.log('[Batch Debug] Selected Nav Score:', bestScore);
-        sidebarLinks = Array.from(bestNav.querySelectorAll('a'));
-      }
-
-      // 2. Fallback específico para DeepWiki original (listas aninhadas)
-      if (sidebarLinks.length === 0) {
-        console.log('[Batch Debug] Fallback: Trying specific selectors...');
-        const nodes = document.querySelectorAll('.border-r-border ul li a, [class*="border-r"] ul li a');
-        sidebarLinks = Array.from(nodes);
+        // Fallback específico para DeepWiki original (listas aninhadas)
+        if (sidebarLinks.length === 0) {
+          console.log('[Batch Debug] Fallback: Trying specific selectors...');
+          const nodes = document.querySelectorAll('.border-r-border ul li a, [class*="border-r"] ul li a');
+          sidebarLinks = Array.from(nodes);
+        }
       }
 
       console.log('[Batch Debug] Raw Sidebar Links:', sidebarLinks.length);
 
-      // 3. Filtragem e Limpeza dos Links
+      // Filtragem e Limpeza dos Links
       const validLinks = sidebarLinks.filter(link => {
          const href = link.getAttribute('href');
-         // Ignora links vazios, âncoras locais, emails e javascript
          if (!href || href.startsWith('mailto') || href.startsWith('javascript')) return false;
 
-         // FIX: Allow anchors if they have a hash! (Don't auto-reject #)
-         // Assuming resolveUrl handles them.
-         
          const urlObj = resolveUrl(href);
          if (!urlObj || urlObj.origin !== baseOrigin) return false;
-         if (!matchesProjectPrefix(urlObj)) return false;
-         
+
+         if (isDevinAi) {
+           // Already filtered during hash link search
+           const linkPathNormalized = urlObj.pathname.replace(/\/$/, '');
+           if (linkPathNormalized !== currentPathNormalized) return false;
+         } else {
+           if (!matchesProjectPrefix(urlObj)) return false;
+         }
+
          const text = link.textContent.trim().toLowerCase();
          if (['logout', 'sign out', 'settings', 'profile', 'home'].includes(text)) return false;
          if (text.length === 0) return false;
 
          return true;
       });
-      
+
       console.log('[Batch Debug] Valid Links after filtering:', validLinks.length);
+      if (validLinks.length > 0) {
+        console.log('[Batch Debug] Sample valid links:', validLinks.slice(0, 5).map(l => l.getAttribute('href')));
+      }
 
       // Remove duplicatas baseadas na URL
       const uniquePagesMap = new Map();

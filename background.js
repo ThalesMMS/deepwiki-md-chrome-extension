@@ -18,21 +18,30 @@ function getProjectPrefix(urlString) {
   try {
     const url = new URL(urlString);
     const pathSegments = url.pathname.split('/').filter(Boolean);
+    const hostname = url.hostname;
+
+    // Devin.ai wiki structure: /wiki/{owner}/{page_slug}
+    // The owner level is the project scope, not the page
+    const isDevinAi = hostname.includes('devin.ai');
 
     // If we have a clear marker like "wiki" or "docs", we want to grab everything up to that point
-    // plus the next 2 segments (Owner/Repo) usually.
-    // e.g. /wiki/Owner/Repo -> /wiki/Owner/Repo
+    // plus the appropriate number of segments based on the site
     const markerIdx = pathSegments.findIndex(seg => ['deepwiki', 'wiki', 'docs'].includes(seg.toLowerCase()));
-    
+
     if (markerIdx >= 0) {
-       // Look for at least 2 segments after the marker (Owner/Project)
-       // If only 1 exists (Owner), we try to include it but prefer 2.
-       // The original logic was Math.min(segments.length, markerIdx + 3).
-       // Let's stick to that but ensure we don't cut off if we are DEEPER.
-       // Actually, the issue was that logic returned /wiki/ThalesMMS (marker+1) instead of marker+2
-       
-       // Improved logic: If we are at /wiki/Owner/Repo/Section..., we want /wiki/Owner/Repo
+       // For Devin.ai: /wiki/{owner} is the project scope (marker + 1 segment)
+       // For DeepWiki: /wiki/{owner}/{repo} is the project scope (marker + 2 segments)
        const segmentsAfterMarker = pathSegments.length - (markerIdx + 1);
+
+       if (isDevinAi) {
+         // Devin.ai: /wiki/Owner is the project prefix (all pages under this owner)
+         if (segmentsAfterMarker >= 1) {
+           return `/${pathSegments.slice(0, markerIdx + 2).join('/')}`;
+         }
+         return `/${pathSegments.slice(0, markerIdx + 1).join('/')}`;
+       }
+
+       // DeepWiki and others: /wiki/Owner/Repo is the project prefix
        if (segmentsAfterMarker >= 2) {
            return `/${pathSegments.slice(0, markerIdx + 3).join('/')}`;
        }
@@ -62,9 +71,12 @@ function filterPagesToProject(pages, currentUrl) {
     return pages || [];
   }
 
+  const isDevinAi = base.hostname.includes('devin.ai');
+  const currentPathNormalized = base.pathname.replace(/\/$/, '');
+
   // Use the robust prefix calculation
   const prefix = getProjectPrefix(currentUrl);
-  
+
   if (!Array.isArray(pages) || pages.length === 0) {
     return [];
   }
@@ -73,6 +85,14 @@ function filterPagesToProject(pages, currentUrl) {
     try {
       const pageUrl = new URL(page.url, base.origin);
       if (pageUrl.origin !== base.origin) return false;
+
+      // For Devin.ai: Only keep links to the SAME page (topics are hash sections)
+      if (isDevinAi) {
+        const pagePathNormalized = pageUrl.pathname.replace(/\/$/, '');
+        return pagePathNormalized === currentPathNormalized;
+      }
+
+      // For DeepWiki: Use the project prefix filter
       if (!prefix) return true;
       return pageUrl.pathname.startsWith(prefix);
     } catch (error) {
@@ -82,6 +102,7 @@ function filterPagesToProject(pages, currentUrl) {
 
   console.log('[Batch Debug] Filtering Report:', {
     currentUrl: currentUrl,
+    siteType: isDevinAi ? 'devin.ai (same-page filter)' : 'deepwiki (prefix filter)',
     derivedPrefix: prefix,
     totalReceived: pages.length,
     kept: filtered.length,
@@ -503,11 +524,42 @@ async function processSinglePage(page) {
     message: `Processing ${currentStep}/${batchState.total}: ${page.title}`
   });
 
-  await navigateToPage(batchState.tabId, page.url);
+  // Check if this is a hash-only change (same page, different section)
+  const tab = await getTabById(batchState.tabId);
+  const hashOnly = isHashChange(tab.url, page.url);
+
+  if (hashOnly) {
+    // For hash-only changes, just update the hash and wait briefly for SPA to update
+    console.log('[Background] Hash-only navigation to:', page.url);
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId: batchState.tabId },
+        func: (destUrl) => {
+          const u = new URL(destUrl);
+          if (window.location.hash !== u.hash) {
+            window.location.hash = u.hash;
+          }
+        },
+        args: [page.url]
+      });
+      // Brief wait for SPA to update content
+      await sleep(500);
+    } catch (err) {
+      console.warn('[Background] Hash navigation failed:', err);
+    }
+  } else {
+    // Full page navigation
+    await navigateToPage(batchState.tabId, page.url);
+  }
+
   if (batchState.cancelRequested) return;
 
-  // Aguarda conteúdo real renderizar (importante para SPA como app.devin.ai)
-  const readiness = await waitForPageContent(batchState.tabId, page.url);
+  // For hash navigation, skip heavy content waiting - content is already loaded
+  let readiness = null;
+  if (!hashOnly) {
+    // Aguarda conteúdo real renderizar (importante para SPA como app.devin.ai)
+    readiness = await waitForPageContent(batchState.tabId, page.url);
+  }
 
   let convertResponse = await sendMessageToTab(batchState.tabId, { action: 'convertToMarkdown' });
   if (!convertResponse || !convertResponse.success) {
@@ -630,7 +682,7 @@ async function runBatchProcessing() {
       level: 'error'
     }, false);
   } finally {
-    await restoreOriginalPage();
+    // Don't restore original page - user prefers to stay on last processed page to preserve console logs
     resetBatchState();
   }
 }
