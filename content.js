@@ -978,6 +978,7 @@ const DeepWikiFixer = {
     text = this.fixInternalLinks(text);
     text = this.fixSectionLinks(text);
     text = this.stripGithubBlobSha(text);
+    text = this.fixMalformedSourceLinks(text);
     text = this.sanitizeMermaid(text);
     return text;
   },
@@ -1058,6 +1059,16 @@ const DeepWikiFixer = {
   stripGithubBlobSha(text) {
     return text.replace(/https:\/\/github\.com\/([^/]+)\/([^/]+)\/blob\/([0-9a-f]{7,40})\//g, 
         "https://github.com/$1/$2/");
+  },
+
+
+  fixMalformedSourceLinks(text) {
+    // Remove malformed line number fragments like #LNaN-LNaN or #Lundefined-Lundefined
+    text = text.replace(/#L(NaN|undefined)(-L(NaN|undefined))?/g, '');
+    // Remove links with literal \n in URL or text (corrupted multi-line content)
+    text = text.replace(/\]\([^)]*\\n[^)]*\)/g, '](broken-link)');
+    text = text.replace(/\[[^\]]*\\n[^\]]*\]/g, '[broken-content]');
+    return text;
   },
 
   sanitizeMermaid(text) {
